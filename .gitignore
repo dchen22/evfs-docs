@@ -1,0 +1,9 @@
+evfs-sandbox/
+evfs-sandbox.img
+linux-6.8/*
+!linux-6.8/fs/
+linux-6.8/fs/*
+!linux-6.8/fs/ext4
+linux-6.8/fs/ext4/*
+!linux-6.8/fs/ext4/ioctl.c
+!linux-6.8/fs/ext4/ext4.h
