@@ -1242,7 +1242,7 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case EXT4_IOC32_PRINTHELLO: 
 		pr_info("ext4: HELLO\n");
 		return 0;
-	case EXT4_IOC_FLIP_BLOCK_BIT:
+	case EXT4_IOC_FLIP_BLOCK_BIT: {
 		__u64 block_number;
 		ext4_group_t group;
 		ext4_grpblk_t offset;
@@ -1250,6 +1250,8 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		struct super_block *sb = file_inode(filp)->i_sb;
 		struct ext4_group_desc *group_descriptor;
 		struct buffer_head *group_descriptor_bh;	// buffer for group descriptor block
+		handle_t *journal_handle;	// one active transaction in the journal
+		int err;
 
 		if (copy_from_user(&block_number, (void __user *)arg, sizeof(block_number))) {
 			return -EFAULT;
@@ -1268,6 +1270,26 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return -EIO;
 		}
 
+		// start a journal transaction
+		// 2 blocks are affected (group descriptor and data bitmap)
+		journal_handle = ext4_journal_start_sb(sb, EXT4_HT_MISC, 2);
+		if (IS_ERR(journal_handle)) {
+			brelse(bitmap_bh);
+			return PTR_ERR(journal_handle);
+		}
+
+		// get access to modify bitmap thru journal
+		err = ext4_journal_get_write_access(journal_handle, sb, bitmap_bh, EXT4_JTR_NONE);
+		if (err) {
+			goto out_journal;
+		}
+
+		// get access to modify group descriptor thru journal
+		err = ext4_journal_get_write_access(journal_handle, sb, group_descriptor_bh, EXT4_JTR_NONE);
+		if (err) {
+			goto out_journal;
+		}
+
 		// flip bit
 		if (ext4_test_bit(offset, bitmap_bh->b_data)) {
 			ext4_clear_bit(offset, bitmap_bh->b_data);
@@ -1276,22 +1298,31 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			ext4_set_bit(offset, bitmap_bh->b_data);
 			pr_info("ext4: set bit %d in group %u\n", offset, group);
 		}
-
 		// update bitmap checksum
 		ext4_block_bitmap_csum_set(sb, group_descriptor, bitmap_bh);
-
 		// update group descriptor checksum
 		ext4_group_desc_csum_set(sb, group, group_descriptor);
 
-		// commit changes
-		mark_buffer_dirty(group_descriptor_bh);	// flush group descriptor checksum changes
-		sync_dirty_buffer(group_descriptor_bh);
+		// add bitmap changes to transaction
+		err = ext4_handle_dirty_metadata(journal_handle, NULL, bitmap_bh);
+		if (err) { goto out_journal; }
 
-		mark_buffer_dirty(bitmap_bh);		// flush bitmap changes
-		sync_dirty_buffer(bitmap_bh);
+		// add group descriptor changes to transaction 
+		err = ext4_handle_dirty_metadata(journal_handle, NULL, group_descriptor_bh);
+		if (err) { goto out_journal; }
+
+		// commit transaction
+		// keep this separate from out_journal since we are updating err here
+		err = ext4_journal_stop(journal_handle);
 		brelse(bitmap_bh);
+		return err;
 
-		return 0;
+out_journal:
+		ext4_journal_stop(journal_handle);
+		brelse(bitmap_bh);
+		return err;
+}
+
 	case FS_IOC_GETFSMAP:
 		return ext4_ioc_getfsmap(sb, (void __user *)arg);
 	case EXT4_IOC_GETVERSION:
@@ -1774,3 +1805,8 @@ int ext4_update_overhead(struct super_block *sb, bool force)
 		return 0;
 	return ext4_update_superblocks_fn(sb, set_overhead, &sbi->s_overhead);
 }
+// test
+// incremental test
+// test
+// test
+// another test
