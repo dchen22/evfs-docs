@@ -1248,6 +1248,8 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		ext4_grpblk_t offset;
 		struct buffer_head *bitmap_bh;
 		struct super_block *sb = file_inode(filp)->i_sb;
+		struct ext4_group_desc *group_descriptor;
+		struct buffer_head *group_descriptor_bh;	// buffer for group descriptor block
 
 		if (copy_from_user(&block_number, (void __user *)arg, sizeof(block_number))) {
 			return -EFAULT;
@@ -1260,6 +1262,12 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			return PTR_ERR(bitmap_bh);
 		}
 
+		group_descriptor = ext4_get_group_desc(sb, group, &group_descriptor_bh);
+		if (!group_descriptor) {
+			brelse(bitmap_bh);
+			return -EIO;
+		}
+
 		// flip bit
 		if (ext4_test_bit(offset, bitmap_bh->b_data)) {
 			ext4_clear_bit(offset, bitmap_bh->b_data);
@@ -1269,8 +1277,17 @@ static long __ext4_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			pr_info("ext4: set bit %d in group %u\n", offset, group);
 		}
 
+		// update bitmap checksum
+		ext4_block_bitmap_csum_set(sb, group_descriptor, bitmap_bh);
+
+		// update group descriptor checksum
+		ext4_group_desc_csum_set(sb, group, group_descriptor);
+
 		// commit changes
-		mark_buffer_dirty(bitmap_bh);
+		mark_buffer_dirty(group_descriptor_bh);	// flush group descriptor checksum changes
+		sync_dirty_buffer(group_descriptor_bh);
+
+		mark_buffer_dirty(bitmap_bh);		// flush bitmap changes
 		sync_dirty_buffer(bitmap_bh);
 		brelse(bitmap_bh);
 
