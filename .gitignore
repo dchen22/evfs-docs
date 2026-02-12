@@ -1,5 +1,8 @@
 evfs-sandbox/
 evfs-sandbox.img
+
+linux-6.8.tar.xz
+
 linux-6.8/*
 !linux-6.8/fs/
 linux-6.8/fs/*
