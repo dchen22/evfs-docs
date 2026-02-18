@@ -1,0 +1,10 @@
+- ensure SB and group descriptor metadata for flipping data block is consistent (e.g. num free data blocks)
+- keep tracker of allocated blocks (so we can only deallocate those)
+- keep new ioctls in a separate file ext4_evfs.c and go there for default in ioctl.c
+- 
+
+
+To avoid full rebuilds on Make, ensure:
+- vscode autosave turned off, in case it touches a lot of files which triggers full rebuilds
+- timedatectl status -> shows that it is running and syncing timestamp with host. 
+    - Otherwise run: sudo systemctl restart systemd-timesyncd

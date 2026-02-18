@@ -1,0 +1,1 @@
+sudo e2fsck -fy /home/evie/code/evfs-sandbox.img
