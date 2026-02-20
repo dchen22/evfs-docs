@@ -1,1 +1,0 @@
-sudo mount -o loop /home/evie/code/evfs-sandbox.img /home/evie/code/evfs-sandbox

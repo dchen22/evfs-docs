@@ -23,10 +23,10 @@
 #include <linux/uuid.h>
 #include "ext4_jbd2.h"
 #include "ext4.h"
+#include "ioctl_evfs.h"
 #include <linux/fsmap.h>
 #include "fsmap.h"
 #include <trace/events/ext4.h>
-#include "ext4-evfs.h"
 
 typedef void ext4_update_sb_callback(struct ext4_super_block *es,
 				       const void *arg);
@@ -1619,8 +1619,7 @@ resizefs_out:
 	case EXT4_IOC_SETFSUUID:
 		return ext4_ioctl_setuuid(filp, (const void __user *)arg);
 	default:
-		return __ext4_evfs_ioctl(filp, cmd, arg);
-		// return -ENOTTY;	// TODO: call our ext4_evfs_ioctl here
+		return ext4_evfs_entry(cmd, inode, sb, arg);
 	}
 }
 
@@ -1723,8 +1722,3 @@ int ext4_update_overhead(struct super_block *sb, bool force)
 		return 0;
 	return ext4_update_superblocks_fn(sb, set_overhead, &sbi->s_overhead);
 }
-// test
-// incremental test
-// test
-// test
-// another test

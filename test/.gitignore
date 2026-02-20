@@ -1,0 +1,4 @@
+*.o
+images/tmp/
+
+test

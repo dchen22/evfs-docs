@@ -1,1 +1,0 @@
-sudo umount /home/evie/code/evfs-sandbox
