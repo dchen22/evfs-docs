@@ -754,8 +754,6 @@ enum {
 #define EXT4_IOC32_GROUP_ADD		_IOW('f', 8, struct compat_ext4_new_group_input)
 #define EXT4_IOC32_GETVERSION_OLD	FS_IOC32_GETVERSION
 #define EXT4_IOC32_SETVERSION_OLD	FS_IOC32_SETVERSION
-#define EXT4_IOC32_PRINTHELLO	_IO('f', 99)
-#define EXT4_IOC_FLIP_BLOCK_BIT _IOW('f', 100, uint64_t)
 #endif
 
 /* Max physical block we can address w/o extents */

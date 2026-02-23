@@ -8,3 +8,8 @@ To avoid full rebuilds on Make, ensure:
 - vscode autosave turned off, in case it touches a lot of files which triggers full rebuilds
 - timedatectl status -> shows that it is running and syncing timestamp with host. 
     - Otherwise run: sudo systemctl restart systemd-timesyncd
+
+- Update modify delete directory entries
+- Should be able to take directory inode num, new file name, new subfile inode num and add as direntry for that directory inode
+- Can be arbitrary name and subfile inode number for now
+- Check how hardlink link+unlink work. Creating hardlinks is just adding a dirent and unlinking is removing a dirent
