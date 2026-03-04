@@ -8,16 +8,16 @@
 
 #define EXT4_NAME_LEN 255
 
-struct ext4_evfs_dentry_delete {
+struct ext4_evfs_delete_dentry {
     uint64_t dir_inode_number; // inode to read dentries of
     uint32_t target_dentry_index;     // ith dentry to get
 };
 
-#define EXT4_IOC_DELETE_DENTRY _IOWR('f', 103, struct ext4_evfs_dentry_delete)
+#define EXT4_IOC_DELETE_DENTRY _IOWR('f', 103, struct ext4_evfs_delete_dentry)
 
 int main(int argc, char * argv[]) {
     int fd;
-    struct ext4_evfs_dentry_delete delete_info;
+    struct ext4_evfs_delete_dentry delete_info;
 
     memset(&delete_info, 0, sizeof(delete_info));
 

@@ -8,20 +8,20 @@
 
 #define EXT4_NAME_LEN 255
 
-struct ext4_evfs_dentry_add {
+struct ext4_evfs_add_dentry {
     uint64_t parent_inode_number;
     uint64_t child_inode_number;
     uint8_t file_type;
     char name[EXT4_NAME_LEN];
 };
 
-#define EXT4_IOC_ADD_DENTRY _IOW('f', 101, struct ext4_evfs_dentry_add)
+#define EXT4_IOC_ADD_DENTRY _IOW('f', 101, struct ext4_evfs_add_dentry)
 #define EXT4_FT_REG_FILE 1
 #define EXT4_FT_DIR      2
 
 int main() {
     int fd;
-    struct ext4_evfs_dentry_add add_info;
+    struct ext4_evfs_add_dentry add_info;
 
     fd = open("/home/evie/code/evfs-sandbox/fileA", O_RDONLY);
     if (fd < 0) {

@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
-struct ext4_evfs_dentry_read {
+struct ext4_evfs_read_dentry {
     uint64_t dir_inode_number; // inode to read dentries of
     uint32_t target_dentry_index;     // ith dentry to get
 
@@ -18,14 +18,14 @@ struct ext4_evfs_dentry_read {
     char name[256]; // 256 = EXT4_NAME_LEN + 1
 };
 
-#define EXT4_IOC_READ_DENTRY _IOWR('f', 102, struct ext4_evfs_dentry_read)
+#define EXT4_IOC_READ_DENTRY _IOWR('f', 102, struct ext4_evfs_read_dentry)
 
 int main(int argc, char * argv[]) {
     if (argc < 3) {
         return 1;
     }
     int fd;
-    struct ext4_evfs_dentry_read read_info;
+    struct ext4_evfs_read_dentry read_info;
 
     // zero out read_info
     memset(&read_info, 0, sizeof(read_info));

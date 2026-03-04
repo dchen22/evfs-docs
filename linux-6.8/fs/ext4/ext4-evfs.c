@@ -136,7 +136,7 @@ out_journal:
 }
 	case EXT4_IOC_ADD_DENTRY: {
 		pr_info("ext4: ADD_DENTRY called\n");
-		struct ext4_evfs_dentry_add added_dentry_info;
+		struct ext4_evfs_add_dentry added_dentry_info;
 		struct inode * dir_inode;
 		struct buffer_head * bh = NULL;
 		struct ext4_dir_entry_2 * curr_dentry;
@@ -192,19 +192,19 @@ out_journal:
 		if (IS_ERR(bh)) {
 			err = PTR_ERR(bh);
 			pr_warn("ext4-evfs: failed to read directory block: %d\n", err);
-			goto out_stop;
+			goto add_dentry_out_stop;
 		}
 		if (!bh) {
 			pr_warn("ext4-evfs: directory block is NULL\n");
 			err = -EIO;
-			goto out_stop;
+			goto add_dentry_out_stop;
 		}
 
 		// get write access to directory entry block
 		err = ext4_journal_get_write_access(handle, sb, bh, EXT4_JTR_NONE);
 		if (err) {
 			pr_warn("ext4-evfs: failed to get write access: %d\n", err);
-			goto out_brelse;
+			goto add_dentry_out_brelse;
 		}
 
 		kaddr = (char *)bh->b_data;
@@ -262,7 +262,7 @@ out_journal:
 
 				// mark buffer dirty
 				err = ext4_handle_dirty_dirblock(handle, dir_inode, bh);
-				goto out_brelse;
+				goto add_dentry_out_brelse;
 			}
 
 			offset += curr_dentry_rec_len;
@@ -271,16 +271,16 @@ out_journal:
 
 		pr_warn("ext4-evfs: no space in directory block\n");
 		err = -ENOSPC;
-out_brelse:
+add_dentry_out_brelse:
 		brelse(bh);
-out_stop:
+add_dentry_out_stop:
 		ext4_journal_stop(handle);
 		iput(dir_inode);
 		return err;
 }
 	case EXT4_IOC_READ_DENTRY: {
 		pr_info("ext4: READ_DENTRY called\n");
-		struct ext4_evfs_dentry_read read_info;
+		struct ext4_evfs_read_dentry read_info;
 		struct inode * dir_inode;
 		struct buffer_head * bh = NULL;
 		struct ext4_dir_entry_2 * curr_dentry;
@@ -384,7 +384,7 @@ out_stop:
 	case EXT4_IOC_DELETE_DENTRY: {
 		pr_info("ext4: DELETE_DENTRY called\n");
 
-		struct ext4_evfs_dentry_delete delete_info;
+		struct ext4_evfs_delete_dentry delete_info;
 		struct inode * dir_inode;
 		struct buffer_head * bh = NULL;
 		struct ext4_dir_entry_2 * curr_dentry;
@@ -515,6 +515,116 @@ out_stop:
 delete_dentry_out_brelse:
 		brelse(bh);
 delete_dentry_out_stop:
+		ext4_journal_stop(handle);
+		iput(dir_inode);
+		return err;
+}
+	case EXT4_IOC_UPDATE_DENTRY: {
+		pr_info("ext4: UPDATE_DENTRY called\n");
+
+		struct ext4_evfs_update_dentry update_info;
+		struct inode * dir_inode;
+		struct buffer_head * bh = NULL;
+		struct ext4_dir_entry_2 * curr_dentry;
+		struct ext4_dir_entry_2 * target_dentry = NULL;
+		handle_t * handle;
+		unsigned int offset = 0;
+		unsigned int blocksize;
+		unsigned int entry_count = 0;
+		int err = -ENOENT;
+
+		// copy from userspace
+		if (copy_from_user(&update_info, (void __user *)arg, sizeof(update_info))) {
+			return -EFAULT;
+		}
+
+		// get directory inode
+		dir_inode = ext4_iget(sb, update_info.dir_inode_number, EXT4_IGET_NORMAL);
+		if (IS_ERR(dir_inode)) {
+			err = PTR_ERR(dir_inode);
+			pr_warn("ext4-evfs: failed to get directory inode: %llu: %d\n",
+					update_info.dir_inode_number, err);
+			return err;
+		}
+
+		// verify it is a directory
+		if (!(S_ISDIR(dir_inode->i_mode))) {
+			pr_warn("ext4-evfs: inode %llu is not a directory\n", update_info.dir_inode_number);
+			iput(dir_inode);
+			return -ENOTDIR;
+		}
+
+		blocksize = dir_inode->i_sb->s_blocksize;
+
+		// start journal transaction
+		handle = ext4_journal_start(dir_inode, EXT4_HT_DIR, 1);
+		if (IS_ERR(handle)) {
+			err = PTR_ERR(handle);
+			iput(dir_inode);
+			return err;
+		}
+
+		// read first directory block
+		bh = ext4_bread(NULL, dir_inode, 0, 0);
+		if (IS_ERR_OR_NULL(bh)) {
+			err = bh ? PTR_ERR(bh) : -EIO;
+			pr_warn("ext4-evfs: failed to read directory block:%d\n", err);
+			goto update_dentry_out_stop;
+		}
+
+		// get write access to directory block
+		err = ext4_journal_get_write_access(handle, sb, bh, EXT4_JTR_NONE);
+		if (err) {
+			pr_warn("ext4-evfs: failed to get write access to journal: %d\n", err);
+			goto update_dentry_out_brelse;
+		}
+
+		curr_dentry = (struct ext4_dir_entry_2 *)bh->b_data;
+
+		// iterate through to find the ith dentry
+		unsigned int trailing_checksum_size = 0; // space reserved at the end of the block for the checksum
+		if (ext4_has_metadata_csum(sb)) {	// check if this fs is using metadata checksums
+			trailing_checksum_size = sizeof(struct ext4_dir_entry_tail);
+		}
+
+		while (offset < blocksize - trailing_checksum_size) {
+
+			unsigned int rec_len = le16_to_cpu(curr_dentry->rec_len);
+
+			if (rec_len == 0) {	// end of entries
+				break;
+			}
+
+			if (curr_dentry->inode != 0) {	// skip deleted entries
+				// found target dentry
+				if (entry_count == update_info.target_dentry_index) {	
+					curr_dentry->inode = cpu_to_le32(update_info.new_inode_number);
+
+					// mark buffer dirty (handles dirblock checksum)
+					err = ext4_handle_dirty_dirblock(handle, dir_inode, bh);
+
+					pr_info("ext4-evfs: updated entry %u to inode %u\n",
+							entry_count, curr_dentry->inode);
+
+					goto update_dentry_out_brelse;
+				}
+
+				entry_count++;
+			}
+
+			offset += rec_len;
+			curr_dentry = (struct ext4_dir_entry_2 *)((char *)curr_dentry + rec_len);
+
+		}
+
+		if (err == -ENOENT) {
+			pr_warn("ext4-evfs: update failed, index %u out of bounds\n",
+					update_info.target_dentry_index);
+		}
+
+update_dentry_out_brelse:
+		brelse(bh);
+update_dentry_out_stop:
 		ext4_journal_stop(handle);
 		iput(dir_inode);
 		return err;
