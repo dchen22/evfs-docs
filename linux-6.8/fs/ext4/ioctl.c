@@ -1619,6 +1619,8 @@ resizefs_out:
 	case EXT4_IOC_SETFSUUID:
 		return ext4_ioctl_setuuid(filp, (const void __user *)arg);
 	default:
+		ext4_msg(sb, KERN_ERR,
+				 "evfs called, cmd: %u", cmd);
 		return __ext4_evfs_ioctl(filp, cmd, arg);
 		// return -ENOTTY;	// TODO: call our ext4_evfs_ioctl here
 	}

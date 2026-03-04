@@ -1,8 +1,7 @@
-- ensure SB and group descriptor metadata for flipping data block is consistent (e.g. num free data blocks)
-- keep tracker of allocated blocks (so we can only deallocate those)
-- keep new ioctls in a separate file ext4_evfs.c and go there for default in ioctl.c
-- 
-
+- Test add and read dentry, unmount, clear page cache + dentries + inodes, remount, check if persistent
+    - yes
+- Update should only change sub inode number
+- Look into __ext4_link and unlink to do the dentry adding and removal 
 
 To avoid full rebuilds on Make, ensure:
 - vscode autosave turned off, in case it touches a lot of files which triggers full rebuilds
