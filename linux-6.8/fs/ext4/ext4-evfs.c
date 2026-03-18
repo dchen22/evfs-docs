@@ -16,6 +16,18 @@
 #include "fsmap.h"
 #include <trace/events/ext4.h>
 #include "ext4-evfs.h"
+#include "../internal.h"
+
+int ext4_add_entry(handle_t *handle, struct dentry *dentry,
+			  struct inode *inode);
+int ext4_delete_entry(handle_t *handle,
+			     struct inode *dir,
+			     struct ext4_dir_entry_2 *de_del,
+			     struct buffer_head *bh);
+struct buffer_head *ext4_find_entry(struct inode *dir,
+					   const struct qstr *d_name,
+					   struct ext4_dir_entry_2 **res_dir,
+					   int *inlined);
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct inode *inode = file_inode(filp);
@@ -136,148 +148,89 @@ out_journal:
 }
 	case EXT4_IOC_ADD_DENTRY: {
 		pr_info("ext4: ADD_DENTRY called\n");
-		struct ext4_evfs_add_dentry added_dentry_info;
+		struct ext4_evfs_add_dentry add_info;
 		struct inode * dir_inode;
-		struct buffer_head * bh = NULL;
-		struct ext4_dir_entry_2 * curr_dentry;
-		handle_t * handle;
+		struct inode * child_inode;
+		struct dentry * parent_dentry;
+		struct dentry * new_dentry;
+		struct qstr qname;
 		int err;
-		unsigned int blocksize;
-		unsigned int offset;
-		char * kaddr;
 
 		// copy from userspace
-		if (copy_from_user(&added_dentry_info, (void __user *)arg, sizeof(added_dentry_info))) {
+		if (copy_from_user(&add_info, (void __user *)arg, sizeof(add_info))) {
 			return -EFAULT;
 		}
 
-		// validate name length
-		added_dentry_info.name[sizeof(added_dentry_info.name) - 1] = '\0'; // null terminate
-		size_t added_name_len = strlen(added_dentry_info.name);
-		if (added_name_len == 0 || added_name_len > EXT4_NAME_LEN) {
-			pr_warn("ext4-evfs: invalid name length %zu\n", added_name_len);
+		add_info.name[sizeof(add_info.name) - 1] = '\0';
+		size_t name_len = strlen(add_info.name);
+		if (name_len == 0 || name_len > EXT4_NAME_LEN) {
+			pr_warn("ext4-evfs: invalid name length %zu\n", name_len);
 			return -EINVAL;
 		}
 
 		// get parent directory inode
-		dir_inode = ext4_iget(sb, added_dentry_info.parent_inode_number, EXT4_IGET_NORMAL);
+		dir_inode = ext4_iget(sb, add_info.parent_inode_number, EXT4_IGET_NORMAL);
 		if (IS_ERR(dir_inode)) {
-			err = PTR_ERR(dir_inode);
-			pr_warn("ext4-evfs: failed to get directory inode %llu: %d\n",
-					added_dentry_info.parent_inode_number, err);
-			return err;
+			return PTR_ERR(dir_inode);
 		}
-
-		// verify it is a directory
-		if (!(S_ISDIR(dir_inode->i_mode))) {
-			pr_warn("ext4-evfs: parent inode %llu is not a directory\n",
-					added_dentry_info.parent_inode_number);
+		// ensure parent is a dir
+		if (!S_ISDIR(dir_inode->i_mode)) {
+			pr_warn("ext4-evfs: parent inode %llu is not a directory\n", add_info.parent_inode_number);
 			iput(dir_inode);
 			return -ENOTDIR;
 		}
 
-		blocksize = dir_inode->i_sb->s_blocksize;
+		// get child inode (this must exist)
+		child_inode = ext4_iget(sb, add_info.child_inode_number, EXT4_IGET_NORMAL);
+		if (IS_ERR(child_inode)) {
+			iput(dir_inode);	// todo: what is this
+			return PTR_ERR(child_inode);
+		}
 
-		// start journal transaction
-		// only modify dentry block for now
-		handle = ext4_journal_start(dir_inode, EXT4_HT_DIR, 1);
-		if (IS_ERR(handle)) {
-			err = PTR_ERR(handle);
+		// create a dentry for the parent
+		parent_dentry = d_find_any_alias(dir_inode);
+		if (!parent_dentry) {
+			parent_dentry = d_alloc_pseudo(sb, &(struct qstr)QSTR_INIT("/", 1));
+			if (!parent_dentry) {
+				iput(child_inode);
+				iput(dir_inode);
+				return -ENOMEM;
+			}
+			d_instantiate(parent_dentry, dir_inode);
+		}
+
+		// create dentry for new entry
+		qname.name = add_info.name;
+		qname.len = strlen(add_info.name);
+		qname.hash = 0;
+
+		new_dentry = d_alloc(parent_dentry, &qname);
+		if (!new_dentry) {
+			dput(parent_dentry);
+			iput(child_inode);
 			iput(dir_inode);
+			return -ENOMEM;
+		}
+
+		err = __ext4_link(dir_inode, child_inode, new_dentry);
+
+		// cleanup
+		dput(new_dentry);
+		dput(parent_dentry);
+		iput(child_inode);
+		iput(dir_inode);
+
+		if (err) {
+			pr_warn("ext4-evfs: __ext4_link failed: %d\n", err);
 			return err;
 		}
 
-		// read the first block of the directory
-		bh = ext4_bread(handle, dir_inode, 0, 0);
-		if (IS_ERR(bh)) {
-			err = PTR_ERR(bh);
-			pr_warn("ext4-evfs: failed to read directory block: %d\n", err);
-			goto add_dentry_out_stop;
-		}
-		if (!bh) {
-			pr_warn("ext4-evfs: directory block is NULL\n");
-			err = -EIO;
-			goto add_dentry_out_stop;
-		}
+		pr_info("ext4-evfs: added entry '%s' (parent=%llu, child=%llu)\n",
+				add_info.name, add_info.parent_inode_number, add_info.child_inode_number);
 
-		// get write access to directory entry block
-		err = ext4_journal_get_write_access(handle, sb, bh, EXT4_JTR_NONE);
-		if (err) {
-			pr_warn("ext4-evfs: failed to get write access: %d\n", err);
-			goto add_dentry_out_brelse;
-		}
+		return 0;
+	}
 
-		kaddr = (char *)bh->b_data;
-
-		// find space at the end of the dentry block
-		offset = 0;
-		curr_dentry = (struct ext4_dir_entry_2 *)kaddr;	// current dentry as we iterate thru directory block
-
-		
-		unsigned int trailing_checksum_size = 0; // space reserved at the end of the block for the checksum
-		if (ext4_has_metadata_csum(sb)) {	// check if this fs is using metadata checksums
-			trailing_checksum_size = sizeof(struct ext4_dir_entry_tail);
-		}
-
-		// find next available space
-		while (offset < blocksize - trailing_checksum_size) {
-			if (curr_dentry->rec_len == 0) {	
-				// invalid entry
-				break;
-			}
-
-			// check if current dentry is claiming more space than needed (i.e. slack)
-			// occurs when a deleted dentry's space is merged with a neighbouring dentry
-			// or if this is the last dentry in the block
-			unsigned int curr_dentry_actual_len = ext4_dir_rec_len(curr_dentry->name_len, dir_inode);
-			unsigned int curr_dentry_rec_len = le16_to_cpu(curr_dentry->rec_len);
-			unsigned int new_dentry_actual_len = ext4_dir_rec_len(added_name_len, dir_inode);
-
-			// if current dentry's received space can fit its actual space and the new dentry
-			if (curr_dentry_rec_len >= curr_dentry_actual_len + new_dentry_actual_len) {
-
-				struct ext4_dir_entry_2 * new_dentry;
-				
-				// if current dentry is a free space (inode_num = 0) we can just replace it directly
-				// otherwise we need to shrink it and add new dentry after
-				if (le32_to_cpu(curr_dentry->inode) != 0) {
-					// shrink current entry
-					curr_dentry->rec_len = cpu_to_le16(curr_dentry_actual_len);
-
-					// create new dentry after it
-					new_dentry = (struct ext4_dir_entry_2 *)((char *)curr_dentry + curr_dentry_actual_len);
-					new_dentry->rec_len = cpu_to_le16(curr_dentry_rec_len - curr_dentry_actual_len);	
-				} else {
-					new_dentry = curr_dentry;	// just replace curr dentry
-				}
-				
-				new_dentry->inode = cpu_to_le32(added_dentry_info.child_inode_number);
-				new_dentry->name_len = added_name_len;
-				new_dentry->file_type = added_dentry_info.file_type;
-				memcpy(new_dentry->name, added_dentry_info.name, added_name_len);
-
-				pr_info("ext4-evfs: added raw dentry '%s' (ino=%llu, type=%u) to dir %llu\n",
-						added_dentry_info.name, added_dentry_info.child_inode_number,
-						added_dentry_info.file_type, added_dentry_info.parent_inode_number);
-
-				// mark buffer dirty
-				err = ext4_handle_dirty_dirblock(handle, dir_inode, bh);
-				goto add_dentry_out_brelse;
-			}
-
-			offset += curr_dentry_rec_len;
-			curr_dentry = (struct ext4_dir_entry_2 *)(kaddr + offset);
-		}
-
-		pr_warn("ext4-evfs: no space in directory block\n");
-		err = -ENOSPC;
-add_dentry_out_brelse:
-		brelse(bh);
-add_dentry_out_stop:
-		ext4_journal_stop(handle);
-		iput(dir_inode);
-		return err;
-}
 	case EXT4_IOC_READ_DENTRY: {
 		pr_info("ext4: READ_DENTRY called\n");
 		struct ext4_evfs_read_dentry read_info;
@@ -385,20 +338,21 @@ add_dentry_out_stop:
 		pr_info("ext4: DELETE_DENTRY called\n");
 
 		struct ext4_evfs_delete_dentry delete_info;
-		struct inode * dir_inode;
 		struct buffer_head * bh = NULL;
-		struct ext4_dir_entry_2 * curr_dentry;
-		struct ext4_dir_entry_2 * target_dentry = NULL;
-		handle_t * handle;
-		unsigned int offset = 0;
-		unsigned int blocksize;
-		unsigned int entry_count = 0;
-		int err;
+		struct inode * dir_inode;
+		struct inode * child_inode = NULL;
+		struct dentry * parent_dentry;
+		struct dentry * delete_dentry;
+		struct qstr qname;
+		struct ext4_dir_entry_2 * de;	
+		int err = 0;
 
 		// copy from userspace
 		if (copy_from_user(&delete_info, (void __user *)arg, sizeof(delete_info))) {
 			return -EFAULT;
 		}
+
+		delete_info.name[sizeof(delete_info.name) - 1] = '\0';	// input sanitation
 
 		// get directory inode
 		dir_inode = ext4_iget(sb, delete_info.dir_inode_number, EXT4_IGET_NORMAL);
@@ -416,109 +370,68 @@ add_dentry_out_stop:
 			return -ENOTDIR;
 		}
 
-		blocksize = dir_inode->i_sb->s_blocksize;
+		qname.name = delete_info.name;
+		qname.len = strlen(delete_info.name);
+		qname.hash = 0;
 
-		// start journal transaction
-		handle = ext4_journal_start(dir_inode, EXT4_HT_DIR, 1);
-		if (IS_ERR(handle)) {
-			err = PTR_ERR(handle);
+		bh = ext4_find_entry(dir_inode, &qname, &de, NULL);
+		if (IS_ERR_OR_NULL(bh)) {
+			pr_warn("ext4-evfs: entry '%s' not found\n", delete_info.name);
 			iput(dir_inode);
+			return bh ? PTR_ERR(bh) : -ENOENT;
+		}
+
+		// get child inode
+		uint32_t child_inode_number = le32_to_cpu(de->inode);
+		child_inode = ext4_iget(sb, child_inode_number, EXT4_IGET_NORMAL);
+		brelse(bh);
+
+		if (IS_ERR(child_inode)) {
+			err = PTR_ERR(child_inode);
+			iput(dir_inode);
+			pr_warn("ext4-evfs: failed to get child inode: %d\n", err);
 			return err;
 		}
 
-		// read first directory block
-		bh = ext4_bread(NULL, dir_inode, 0, 0);
-		if (IS_ERR_OR_NULL(bh)) {
-			err = bh ? PTR_ERR(bh) : -EIO;
-			pr_warn("ext4-evfs: failed to read directory block:%d\n", err);
-			goto delete_dentry_out_stop;
-		}
-
-		// get write access to directory block
-		err = ext4_journal_get_write_access(handle, sb, bh, EXT4_JTR_NONE);
-		if (err) {
-			pr_warn("ext4-evfs: failed to get write access to journal: %d\n", err);
-			goto delete_dentry_out_brelse;
-		}
-
-		struct ext4_dir_entry_2 * prev_dentry = NULL;	// dentry before the one we want to delete
-		curr_dentry = (struct ext4_dir_entry_2 *)bh->b_data;
-
-		// iterate through to find the ith dentry
-		unsigned int trailing_checksum_size = 0; // space reserved at the end of the block for the checksum
-		if (ext4_has_metadata_csum(sb)) {	// check if this fs is using metadata checksums
-			trailing_checksum_size = sizeof(struct ext4_dir_entry_tail);
-		}
-
-		while (offset < blocksize - trailing_checksum_size) {
-
-			unsigned int rec_len = le16_to_cpu(curr_dentry->rec_len);
-
-			if (rec_len == 0) {	// end of entries
-				break;
+		// create dentries
+		parent_dentry = d_find_any_alias(dir_inode);
+		if (!parent_dentry) {
+			parent_dentry = d_alloc_pseudo(sb, &(struct qstr)QSTR_INIT("/", 1));
+			if (!parent_dentry) {
+				iput(child_inode);
+				iput(dir_inode);
+				return -ENOMEM;
 			}
-
-			if (curr_dentry->inode != 0) {	// skip deleted entries
-				// found target dentry
-				if (entry_count == delete_info.target_dentry_index) {	
-					target_dentry = curr_dentry;
-					break;
-				}
-
-				entry_count++;
-				prev_dentry = curr_dentry;
-			}
-
-			offset += rec_len;
-			curr_dentry = (struct ext4_dir_entry_2 *)((char *)curr_dentry + rec_len);
-
+			d_instantiate(parent_dentry, dir_inode);
 		}
 
-		// check if target was not found
-		if (target_dentry == NULL) {
-			pr_warn("ext4-evfs: Entry %u not found for directory inode %llu\n",
-					delete_info.target_dentry_index, delete_info.dir_inode_number);
-			err = -ENOENT;
-			goto delete_dentry_out_brelse;
+		delete_dentry = d_alloc(parent_dentry, &qname);
+		if (!delete_dentry) {
+			dput(parent_dentry);
+			iput(child_inode);
+			iput(dir_inode);
+			return -ENOMEM;
 		}
 
-		// target is found
-		unsigned int target_rec_len = le16_to_cpu(target_dentry->rec_len);
-
-		// perform merge
-		if (prev_dentry != NULL) {
-			unsigned int prev_rec_len = le16_to_cpu(prev_dentry->rec_len);
-			prev_dentry->rec_len = cpu_to_le16(prev_rec_len + target_rec_len);	// merge
-
-			pr_info("ext4-evfs: deleted dentry %u ('%.*s', ino=%u) of directory inode %llu\n",
-				delete_info.target_dentry_index,
-				target_dentry->name_len, target_dentry->name,
-				le32_to_cpu(target_dentry->inode),
-				delete_info.dir_inode_number
-			);
-		} else {
-			target_dentry->inode = 0;
-			pr_info("ext4-evfs: deleted first dentry %u ('%.*s', ino=%u) of directory inode %llu\n",
-				delete_info.target_dentry_index,
-				target_dentry->name_len, target_dentry->name,
-				le32_to_cpu(target_dentry->inode),
-				delete_info.dir_inode_number
-			);
-		}
-
-		// // update checksum
-		// ext4_dirblock_csum_set(dir_inode, bh);
-
-		// mark buffer dirty (handles dirblock checksum)
-		err = ext4_handle_dirty_dirblock(handle, dir_inode, bh);
-
-delete_dentry_out_brelse:
-		brelse(bh);
-delete_dentry_out_stop:
-		ext4_journal_stop(handle);
+		err = __ext4_unlink(dir_inode, &qname, child_inode, delete_dentry);
+	
+		// cleanup
+		dput(delete_dentry);
+		dput(parent_dentry);
+		iput(child_inode);
 		iput(dir_inode);
+
+		if (err) {
+			pr_warn("ext4-evfs: __ext4_unlink failed: %d\n", err);
+		} else {
+			pr_info("ext4-evfs: deleted entry '%s' (inode number=%u) from parent=%llu\n",
+					delete_info.name, child_inode_number, delete_info.dir_inode_number);
+		}
+
 		return err;
-}
+
+
+	}
 	case EXT4_IOC_UPDATE_DENTRY: {
 		pr_info("ext4: UPDATE_DENTRY called\n");
 

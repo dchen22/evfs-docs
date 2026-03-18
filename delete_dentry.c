@@ -10,7 +10,7 @@
 
 struct ext4_evfs_delete_dentry {
     uint64_t dir_inode_number; // inode to read dentries of
-    uint32_t target_dentry_index;     // ith dentry to get
+    char name[EXT4_NAME_LEN];     // ith dentry to get
 };
 
 #define EXT4_IOC_DELETE_DENTRY _IOWR('f', 103, struct ext4_evfs_delete_dentry)
@@ -33,7 +33,7 @@ int main(int argc, char * argv[]) {
     }
 
     delete_info.dir_inode_number = strtoull(argv[1], NULL, 10);
-    delete_info.target_dentry_index = strtoull(argv[2], NULL, 10);
+    strncpy(delete_info.name, argv[2], EXT4_NAME_LEN);
 
     if (ioctl(fd, EXT4_IOC_DELETE_DENTRY, &delete_info) < 0) {
         perror("ioctl DELETE_DENTRY");
@@ -41,8 +41,8 @@ int main(int argc, char * argv[]) {
         return 1;
     }
 
-    printf("Deleted dentry index %u from directory inode %lu\n",
-        delete_info.target_dentry_index, delete_info.dir_inode_number);
+    printf("Deleted dentry '%s' from directory inode %lu\n",
+        delete_info.name, delete_info.dir_inode_number);
 
     close(fd);
     return 0;

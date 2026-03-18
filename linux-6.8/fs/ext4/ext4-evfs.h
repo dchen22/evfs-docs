@@ -21,7 +21,7 @@ struct ext4_evfs_read_dentry {
 
 struct ext4_evfs_delete_dentry {
     __u64 dir_inode_number; // inode to read dentries of
-    __u32 target_dentry_index;     // ith dentry to get
+    char name[EXT4_NAME_LEN];     // name of dentry to delete
 };
 
 struct ext4_evfs_update_dentry {

@@ -30,9 +30,9 @@ int main() {
     }
 
     // populate struct
-    add_info.parent_inode_number = 2;
-    add_info.child_inode_number = 67;
-    add_info.file_type = 3;
+    add_info.parent_inode_number = 131073;   // inode num of some existing directory
+    add_info.child_inode_number = 14;   // inode num of an existing subfile
+    add_info.file_type = EXT4_FT_REG_FILE;
     char * file_name = "bobert";
     
     strncpy(add_info.name, file_name, sizeof(add_info.name)-1);

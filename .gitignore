@@ -13,5 +13,6 @@ linux-6.8/fs/ext4/*
 !linux-6.8/fs/ext4/ext4-evfs.h
 !linux-6.8/fs/ext4/ext4-evfs.c
 !linux-6.8/fs/ext4/Makefile
+!linux-6.8/fs/ext4/namei.c
 
 config-backup
