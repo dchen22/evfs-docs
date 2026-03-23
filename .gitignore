@@ -15,4 +15,13 @@ linux-6.8/fs/ext4/*
 !linux-6.8/fs/ext4/Makefile
 !linux-6.8/fs/ext4/namei.c
 
+workarea/add_dentry
+workarea/delete_dentry
+workarea/read_dentry
+workarea/test_data_bitflip
+workarea/test_hello_ioctl
+workarea/test-update-behaviour
+workarea/update_dentry
+workarea/build-log.txt
+
 config-backup
