@@ -28,6 +28,8 @@ struct buffer_head *ext4_find_entry(struct inode *dir,
 					   const struct qstr *d_name,
 					   struct ext4_dir_entry_2 **res_dir,
 					   int *inlined);
+struct buffer_head *
+ext4_read_inode_bitmap(struct super_block *sb, ext4_group_t block_group);
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct inode *inode = file_inode(filp);
@@ -542,6 +544,42 @@ update_dentry_out_stop:
 		iput(dir_inode);
 		return err;
 }
+	case EXT4_IOC_ITER_INODE: {
+		struct ext4_evfs_iter_inode iter_info;
+		if (copy_from_user(&iter_info, (void __user *)arg, sizeof(iter_info))) {
+			return -EFAULT;
+		}
+
+		__u32 found = 0;
+		__u32 total = le32_to_cpu(EXT4_SB(sb)->s_es->s_inodes_count);
+
+		for (__u32 i = iter_info.start_inode_number + 1; i <= total; i++) {
+			// compute the group and offset of the current inode
+			// inodes are 1-indexed
+			ext4_group_t group = (i - 1) / EXT4_INODES_PER_GROUP(sb);
+			ext4_grpblk_t offset = (i - 1) % EXT4_INODES_PER_GROUP(sb);
+
+			// read inode bitmap for this group
+			struct buffer_head *bitmap_bh = ext4_read_inode_bitmap(sb, group);
+			if (IS_ERR_OR_NULL(bitmap_bh)) {
+				continue;
+			}
+
+			int in_use = ext4_test_bit(offset, bitmap_bh->b_data);
+			brelse(bitmap_bh);
+
+			if (in_use) {
+				found = i;
+				break;
+			}
+		}
+
+		iter_info.result_inode_number = found;
+		if (copy_to_user((void __user *)arg, &iter_info, sizeof(iter_info))) {
+			return -EFAULT;
+		}
+		return 0;
+	}
     default:
         return -ENOTTY;
     }
