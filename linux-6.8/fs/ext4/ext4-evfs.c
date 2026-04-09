@@ -17,6 +17,7 @@
 #include <trace/events/ext4.h>
 #include "ext4-evfs.h"
 #include "../internal.h"
+#include "ext4_extents.h"
 
 int ext4_add_entry(handle_t *handle, struct dentry *dentry,
 			  struct inode *inode);
@@ -30,6 +31,7 @@ struct buffer_head *ext4_find_entry(struct inode *dir,
 					   int *inlined);
 struct buffer_head *
 ext4_read_inode_bitmap(struct super_block *sb, ext4_group_t block_group);
+void ext4_ext_drop_refs(struct ext4_ext_path *path);
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct inode *inode = file_inode(filp);
@@ -620,6 +622,82 @@ update_dentry_out_stop:
 		iter_info.result_block = found_start;
 		iter_info.result_length = found_length;
 		if (copy_to_user((void __user *)arg, &iter_info, sizeof(iter_info))) {
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case EXT4_IOC_GET_INODE_EXTENTS: {
+		struct ext4_evfs_get_inode_extents extent_info;
+		if (copy_from_user(&extent_info, (void __user *)arg, sizeof(extent_info))) {
+			return -EFAULT;
+		}
+
+		// get target inode
+		struct inode *target_inode = ext4_iget(sb, extent_info.inode_number, EXT4_IGET_NORMAL);
+		if (IS_ERR(target_inode)) {
+			return PTR_ERR(target_inode);
+		}
+
+		// need to ensure inode is extent-based rather than block-based (older)
+		if (!ext4_test_inode_flag(target_inode, EXT4_INODE_EXTENTS)) {
+			iput(target_inode);
+			return -EOPNOTSUPP;
+		}
+
+		struct ext4_ext_path *path = NULL;
+		__u32 count = 0;
+		ext4_lblk_t block = 0;
+
+		while (count < extent_info.max_num_extents) {
+			// find which extent covers <block>, or the next that follows it	
+			// each inode uses an extent tree. Extent is stored at leaf. Path[-1] is leaf
+			path = ext4_find_extent(target_inode, block, &path, 0);
+			if (IS_ERR(path)) {
+				path = NULL;
+				break;
+			}
+
+			/* Find depth of extent tree */
+			int depth = ext_depth(target_inode);
+			/* path[depth] is leaf of extree */
+			struct ext4_extent *ex = path[depth].p_ext;	/* p_ext points to extent */
+			if (!ex) {
+				break;	/* no more extents */
+			}
+
+			// construct our custom extent struct
+			struct ext4_evfs_extent extent;
+			extent.start_block = ((ext4_fsblk_t)le16_to_cpu(ex->ee_start_hi) << 32) | le32_to_cpu(ex->ee_start_lo);
+			extent.length = ext4_ext_get_actual_len(ex);
+
+			if (copy_to_user(&extent_info.extents[count], &extent, sizeof(extent))) {
+				ext4_ext_drop_refs(path);
+				kfree(path);
+				iput(target_inode);
+				return -EFAULT;
+			}
+
+			count++;
+
+			/* 
+			Advance block cursor to just past this extent 
+			ext4_find_extent (on next iteration) will find the next extent at or past this block
+			*/ 
+			block = le32_to_cpu(ex->ee_block) + ext4_ext_get_actual_len(ex);
+
+			// // drop buffer head refs but keep path allocated for reuse
+			// ext4_ext_drop_refs(path);
+		}
+
+		if (path) {
+			ext4_ext_drop_refs(path);
+			kfree(path);
+		}
+
+		iput(target_inode);
+
+		extent_info.result_num_extents = count;
+		if (copy_to_user((void __user *)arg, &extent_info, sizeof(extent_info))) {
 			return -EFAULT;
 		}
 		return 0;

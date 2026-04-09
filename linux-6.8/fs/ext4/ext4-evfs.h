@@ -41,6 +41,18 @@ struct ext4_evfs_iter_freespace {
     __u64 result_length;    // how many free blocks occur consecutively
 };
 
+struct ext4_evfs_extent {
+    __u64 start_block;   // physical block number where this extent starts
+    __u32 length;        // length in blocks
+};
+
+struct ext4_evfs_get_inode_extents {
+    __u64 inode_number;         // input
+    __u32 max_num_extents;      // input: capacity of user buffer
+    __u32 result_num_extents;   // output: number of extents written to user buffer
+    struct ext4_evfs_extent __user *extents;    // input: user buffer
+};
+
 #define EXT4_IOC32_PRINTHELLO	_IO('f', 99)
 #define EXT4_IOC_FLIP_BLOCK_BIT _IOW('f', 100, uint64_t)
 #define EXT4_IOC_ADD_DENTRY _IOW('f', 101, struct ext4_evfs_add_dentry)
@@ -49,5 +61,6 @@ struct ext4_evfs_iter_freespace {
 #define EXT4_IOC_UPDATE_DENTRY _IOWR('f', 104, struct ext4_evfs_update_dentry)
 #define EXT4_IOC_ITER_INODE _IOR('f', 105, struct ext4_evfs_iter_inode)
 #define EXT4_IOC_ITER_FREESPACE _IOR('f', 106, struct ext4_evfs_iter_freespace)
+#define EXT4_IOC_GET_INODE_EXTENTS _IOR('f', 107, struct ext4_evfs_get_inode_extents)
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
