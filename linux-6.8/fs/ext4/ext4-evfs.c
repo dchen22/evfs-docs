@@ -580,6 +580,50 @@ update_dentry_out_stop:
 		}
 		return 0;
 	}
+	case EXT4_IOC_ITER_FREESPACE: {
+		struct ext4_evfs_iter_freespace iter_info;
+		if (copy_from_user(&iter_info, (void __user *)arg, sizeof(iter_info))) {
+			return -EFAULT;
+		}
+
+		__u64 found_start = 0;
+		__u64 found_length = 0;
+		__u64 total_blocks = ext4_blocks_count(EXT4_SB(sb)->s_es);
+		int in_free_extent = 0;
+
+		for (__u64 b = iter_info.start_block + 1; b <= total_blocks; b++) {
+			ext4_group_t group;
+			ext4_grpblk_t offset;
+			ext4_get_group_no_and_offset(sb, (ext4_fsblk_t)b, &group, &offset);
+
+			struct buffer_head *bitmap_bh = ext4_read_block_bitmap(sb, group);
+			// found unreadable blocks
+			if (IS_ERR_OR_NULL(bitmap_bh)) {
+				if (in_free_extent) break;	// assume current free extent stops right before unreadable blocks
+				continue;	// otherwise, continue checking for free extents after unreadable blocks
+			}
+
+			int is_free = !ext4_test_bit(offset, bitmap_bh->b_data);
+			brelse(bitmap_bh);
+
+			if (is_free) {
+				if (!in_free_extent) {
+					found_start = b;
+					in_free_extent = 1;
+				}
+				found_length++;
+			} else if (in_free_extent) {
+				break;
+			}
+		}
+
+		iter_info.result_block = found_start;
+		iter_info.result_length = found_length;
+		if (copy_to_user((void __user *)arg, &iter_info, sizeof(iter_info))) {
+			return -EFAULT;
+		}
+		return 0;
+	}
     default:
         return -ENOTTY;
     }

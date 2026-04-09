@@ -35,6 +35,12 @@ struct ext4_evfs_iter_inode {
     __u64 result_inode_number;   // next active inode number
 };
 
+struct ext4_evfs_iter_freespace {
+    __u64 start_block;      // some block in data section ("start block")
+    __u64 result_block;     // next free block after start block
+    __u64 result_length;    // how many free blocks occur consecutively
+};
+
 #define EXT4_IOC32_PRINTHELLO	_IO('f', 99)
 #define EXT4_IOC_FLIP_BLOCK_BIT _IOW('f', 100, uint64_t)
 #define EXT4_IOC_ADD_DENTRY _IOW('f', 101, struct ext4_evfs_add_dentry)
@@ -42,5 +48,6 @@ struct ext4_evfs_iter_inode {
 #define EXT4_IOC_DELETE_DENTRY _IOWR('f', 103, struct ext4_evfs_delete_dentry)
 #define EXT4_IOC_UPDATE_DENTRY _IOWR('f', 104, struct ext4_evfs_update_dentry)
 #define EXT4_IOC_ITER_INODE _IOR('f', 105, struct ext4_evfs_iter_inode)
+#define EXT4_IOC_ITER_FREESPACE _IOR('f', 106, struct ext4_evfs_iter_freespace)
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
