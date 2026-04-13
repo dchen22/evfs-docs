@@ -662,7 +662,11 @@ update_dentry_out_stop:
 			/* path[depth] is leaf of extree */
 			struct ext4_extent *ex = path[depth].p_ext;	/* p_ext points to extent */
 			if (!ex) {
-				break;	/* no more extents */
+				break;	/* no extents */
+			}
+			/* Check if we are looking at the same extent over and over, it means there's no more */
+			if (le32_to_cpu(ex->ee_block) + ext4_ext_get_actual_len(ex) <= block) {
+				break;
 			}
 
 			// construct our custom extent struct
@@ -684,7 +688,7 @@ update_dentry_out_stop:
 			ext4_find_extent (on next iteration) will find the next extent at or past this block
 			*/ 
 			block = le32_to_cpu(ex->ee_block) + ext4_ext_get_actual_len(ex);
-
+			// pr_info("evfs: reassigned block to %u\n", block);
 			// // drop buffer head refs but keep path allocated for reuse
 			// ext4_ext_drop_refs(path);
 		}

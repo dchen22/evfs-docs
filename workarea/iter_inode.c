@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     int fd;
-    fd = open("/home/evie/code/evfs-sandbox/fileA", O_RDONLY);
+    fd = open("/home/evie/code/evfs-sandbox", O_RDONLY);
     if (fd < 0) {
         perror("open");
         return 1;
