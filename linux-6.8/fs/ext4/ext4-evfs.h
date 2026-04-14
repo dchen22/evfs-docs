@@ -53,6 +53,13 @@ struct ext4_evfs_get_inode_extents {
     struct ext4_evfs_extent __user *extents;    // input: user buffer
 };
 
+struct ext4_evfs_inode_remap {
+    __u64 inode_number; // input
+    __u64 start_block;  // input
+    __u32 length;       // input
+    __u32 _padding;     // alignment
+};
+
 #define EXT4_IOC32_PRINTHELLO	_IO('f', 99)
 #define EXT4_IOC_FLIP_BLOCK_BIT _IOW('f', 100, uint64_t)
 #define EXT4_IOC_ADD_DENTRY _IOW('f', 101, struct ext4_evfs_add_dentry)
@@ -62,5 +69,6 @@ struct ext4_evfs_get_inode_extents {
 #define EXT4_IOC_ITER_INODE _IOR('f', 105, struct ext4_evfs_iter_inode)
 #define EXT4_IOC_ITER_FREESPACE _IOR('f', 106, struct ext4_evfs_iter_freespace)
 #define EXT4_IOC_GET_INODE_EXTENTS _IOR('f', 107, struct ext4_evfs_get_inode_extents)
+#define EXT4_IOC_INODE_REMAP _IOW('f', 108, struct ext4_evfs_inode_remap)
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);

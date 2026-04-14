@@ -555,7 +555,7 @@ update_dentry_out_stop:
 		__u32 found = 0;
 		__u32 total = le32_to_cpu(EXT4_SB(sb)->s_es->s_inodes_count);
 
-		for (__u32 i = iter_info.start_inode_number + 1; i <= total; i++) {
+		for (__u32 i = iter_info.start_inode_number; i <= total; i++) {
 			// compute the group and offset of the current inode
 			// inodes are 1-indexed
 			ext4_group_t group = (i - 1) / EXT4_INODES_PER_GROUP(sb);
@@ -593,7 +593,7 @@ update_dentry_out_stop:
 		__u64 total_blocks = ext4_blocks_count(EXT4_SB(sb)->s_es);
 		int in_free_extent = 0;
 
-		for (__u64 b = iter_info.start_block + 1; b <= total_blocks; b++) {
+		for (__u64 b = iter_info.start_block; b <= total_blocks; b++) {
 			ext4_group_t group;
 			ext4_grpblk_t offset;
 			ext4_get_group_no_and_offset(sb, (ext4_fsblk_t)b, &group, &offset);
@@ -705,6 +705,70 @@ update_dentry_out_stop:
 			return -EFAULT;
 		}
 		return 0;
+	}
+	case EXT4_IOC_INODE_REMAP: {
+		struct ext4_evfs_inode_remap remap_info;
+		if (copy_from_user(&remap_info, (void __user *)arg, sizeof(remap_info))) {
+			return -EFAULT;
+		}
+
+		struct inode *target_inode = ext4_iget(sb, remap_info.inode_number, EXT4_IGET_NORMAL); 
+		if (IS_ERR(target_inode)) {
+			return PTR_ERR(target_inode);
+		}
+
+		if (!ext4_test_inode_flag(target_inode, EXT4_INODE_EXTENTS)) {
+			iput(target_inode);
+			return -EOPNOTSUPP;
+		}
+
+		/* Affect up to 10 blocks */
+		handle_t *handle = ext4_journal_start(target_inode, EXT4_HT_MISC, 10);
+		if (IS_ERR(handle)) {
+			iput(target_inode);
+			return PTR_ERR(handle);
+		}
+
+		/* Remove all existing extents */
+		int err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
+		if (err) {
+			pr_warn("evfs: ext4_ext_remove_space failed: %d\n", err);
+			goto inode_remap_out;
+		}
+
+		/* Insert new extent at logical block 0 */
+		struct ext4_extent new_extent;
+		new_extent.ee_block = cpu_to_le32(0);
+		new_extent.ee_len = cpu_to_le16(remap_info.length);
+		new_extent.ee_start_hi = cpu_to_le16(remap_info.start_block >> 32);
+		new_extent.ee_start_lo = cpu_to_le32(remap_info.start_block & 0xffffffffULL);
+
+		struct ext4_ext_path *path = NULL;
+		path = ext4_find_extent(target_inode, 0, &path, 0);
+		if (IS_ERR(path)) {
+			err = PTR_ERR(path);
+			path = NULL;
+			goto inode_remap_out;
+		}
+
+		err = ext4_ext_insert_extent(handle, target_inode, &path, &new_extent, 0);
+		if (path) {
+			ext4_ext_drop_refs(path);
+			kfree(path);
+		}
+		if (err) {
+			pr_warn("evfs: ext4_ext_insert_extent failed: %d\n", err);
+			goto inode_remap_out;
+		}
+
+		/* update inode size and mark dirty */
+		target_inode->i_size = (loff_t)remap_info.length * sb->s_blocksize;
+		err = ext4_mark_inode_dirty(handle, target_inode);
+
+	inode_remap_out:
+		ext4_journal_stop(handle);
+		iput(target_inode);
+		return err;
 	}
     default:
         return -ENOTTY;

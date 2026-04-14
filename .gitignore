@@ -18,6 +18,10 @@ linux-6.8/fs/ext4/*
 
 workarea/add_dentry
 workarea/delete_dentry
+workarea/get_inode_extents
+workarea/inode_remap
+workarea/iter_freespace
+workarea/iter_inode
 workarea/read_dentry
 workarea/test_data_bitflip
 workarea/test_hello_ioctl
