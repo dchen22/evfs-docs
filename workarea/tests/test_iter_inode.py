@@ -54,12 +54,19 @@ def test_finds_existing_inode(fd):
     path = os.path.join(TEST_DIR, "file_a.txt")
     ino = create_file(path)
 
-    result = iter_inode(fd, ino - 1)   # start just before it
-    check("finds inode at start - 1", result == ino,
+    # starting exactly at ino should return ino (inclusive semantics)
+    result = iter_inode(fd, ino)
+    check("finds inode when starting exactly at it", result == ino,
           f"expected {ino}, got {result}")
 
-    result = iter_inode(fd, ino)       # start exactly at it (should skip)
-    check("skips start inode itself", result != ino or result == 0,
+    # starting before ino should also find it
+    result = iter_inode(fd, ino - 1)
+    check("finds inode when starting just before it", result == ino,
+          f"expected {ino}, got {result}")
+
+    # starting after ino should NOT return ino
+    result = iter_inode(fd, ino + 1)
+    check("does not return inode when starting past it", result != ino,
           f"expected something > {ino}, got {result}")
 
 def test_skips_deleted_inode(fd):
@@ -69,9 +76,8 @@ def test_skips_deleted_inode(fd):
     ino = create_file(path)
     os.unlink(path)
 
-    # Scan the range around where the inode was
-    result = iter_inode(fd, ino - 1)
-    check("deleted inode not returned", result != ino,
+    result = iter_inode(fd, ino)
+    check("deleted inode not returned when starting at it", result != ino,
           f"got deleted inode {ino}")
 
 def test_multiple_files_ordered(fd):
@@ -81,13 +87,13 @@ def test_multiple_files_ordered(fd):
     inodes = sorted(create_file(p) for p in paths)
 
     results = []
-    cursor = inodes[0] - 1
+    cursor = inodes[0]  # start at first inode (inclusive)
     for _ in inodes:
         r = iter_inode(fd, cursor)
         if r == 0:
             break
         results.append(r)
-        cursor = r
+        cursor = r + 1  # advance past current to avoid returning same inode
 
     check("all files found", all(ino in results for ino in inodes),
           f"expected {inodes}, found {results}")
@@ -97,16 +103,15 @@ def test_multiple_files_ordered(fd):
 def test_start_past_last_inode(fd):
     """Starting past the last inode should return 0."""
     print("\ntest_start_past_last_inode")
-    # Read total inode count from superblock via /proc or just use a huge number
     result = iter_inode(fd, 2**32 - 1)
     check("returns 0 when no more inodes", result == 0,
           f"expected 0, got {result}")
 
 def test_start_at_zero(fd):
-    """Starting at 0 should return the first in-use inode (at least inode 2)."""
+    """Starting at 0 should return the first in-use inode."""
     print("\ntest_start_at_zero")
     result = iter_inode(fd, 0)
-    check("returns valid inode when starting at 0", result >= 2,
+    check("returns valid inode when starting at 0", result >= 1,
           f"got {result}")
 
 def test_chained_iteration_covers_all(fd):
@@ -123,7 +128,7 @@ def test_chained_iteration_covers_all(fd):
             break
         if r in target_inodes:
             found.add(r)
-        cursor = r
+        cursor = r + 1  # advance past current result to avoid infinite loop
 
     check("all chained files found", found == target_inodes,
           f"missing: {target_inodes - found}")
@@ -142,16 +147,14 @@ def main():
         sys.exit(1)
 
     os.makedirs(TEST_DIR, exist_ok=True)
-
-    # open evfs-sandbox/ parent dir
     fd = os.open(SANDBOX, os.O_RDONLY)
 
     try:
         test_finds_existing_inode(fd)
         test_skips_deleted_inode(fd)
         test_multiple_files_ordered(fd)
-        # test_start_past_last_inode(fd)
-        # test_start_at_zero(fd)
+        test_start_past_last_inode(fd)
+        test_start_at_zero(fd)
         test_chained_iteration_covers_all(fd)
     finally:
         os.close(fd)

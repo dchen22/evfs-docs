@@ -42,7 +42,6 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		pr_info("ext4: HELLO\n");
 		return 0;
 	case EXT4_IOC_FLIP_BLOCK_BIT: {
-		// TODO: update free block counter
 		__u64 block_number;
 		ext4_group_t group;
 		ext4_grpblk_t offset;
@@ -95,8 +94,10 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
         write access is not needed for superblock. percpu() are atomic in-mem updates
         */
 
-		// flip bit
+		
 		ext4_lock_group(sb, group);
+
+		/* Flip bit */
 		was_set = ext4_test_bit(offset, bitmap_bh->b_data);
 		if (was_set) {
 			ext4_clear_bit(offset, bitmap_bh->b_data);
@@ -105,9 +106,7 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 			ext4_set_bit(offset, bitmap_bh->b_data);
 			pr_info("ext4: Set bit %d in group %u\n", offset, group);
 		}
-		ext4_unlock_group(sb, group);
-
-        // update group descriptor free block count
+		// update group descriptor free block count
         if (was_set) {  // was 1, now is 0. free blocks is 1 more
             ext4_free_group_clusters_set(sb, group_descriptor, 
                 ext4_free_group_clusters(sb, group_descriptor) + 1);
@@ -115,6 +114,14 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
             ext4_free_group_clusters_set(sb, group_descriptor, 
                 ext4_free_group_clusters(sb, group_descriptor) - 1);
         }
+		// update bitmap checksum
+		ext4_block_bitmap_csum_set(sb, group_descriptor, bitmap_bh);
+		// update group descriptor checksum
+		ext4_group_desc_csum_set(sb, group, group_descriptor);
+
+		ext4_unlock_group(sb, group);
+
+        
         // update superblock free block count
         if (was_set) {
             percpu_counter_add(&sbi->s_freeclusters_counter, 1);
@@ -122,10 +129,7 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
             percpu_counter_sub(&sbi->s_freeclusters_counter, 1);
         }
 
-		// update bitmap checksum
-		ext4_block_bitmap_csum_set(sb, group_descriptor, bitmap_bh);
-		// update group descriptor checksum
-		ext4_group_desc_csum_set(sb, group, group_descriptor);
+		
         /*
         superblock checksum is automatically updated when 
         the superblock is written to disk
@@ -145,11 +149,11 @@ long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 		brelse(bitmap_bh);
 		return err;
 
-out_journal:
+	out_journal:
 		ext4_journal_stop(journal_handle);
 		brelse(bitmap_bh);
 		return err;
-}
+	}
 	case EXT4_IOC_ADD_DENTRY: {
 		pr_info("ext4: ADD_DENTRY called\n");
 		struct ext4_evfs_add_dentry add_info;
@@ -729,6 +733,9 @@ update_dentry_out_stop:
 			return PTR_ERR(handle);
 		}
 
+		inode_lock(target_inode);	/* lock inode */
+		down_write(&EXT4_I(target_inode)->i_data_sem);	/* lock extent tree with rw semaphore */
+
 		/* Remove all existing extents */
 		int err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
 		if (err) {
@@ -766,6 +773,8 @@ update_dentry_out_stop:
 		err = ext4_mark_inode_dirty(handle, target_inode);
 
 	inode_remap_out:
+		up_write(&EXT4_I(target_inode)->i_data_sem);
+		inode_unlock(target_inode);
 		ext4_journal_stop(handle);
 		iput(target_inode);
 		return err;

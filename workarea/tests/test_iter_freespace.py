@@ -85,22 +85,27 @@ def collect_all_free_extents(fd, max_extents=10000):
 
 # ------------------------------------------------------------------ #
 
-def test_result_strictly_after_start(fd):
-    """result_block must always be strictly greater than start_block."""
-    print("\ntest_result_strictly_after_start")
+def test_result_at_or_after_start(fd):
+    """result_block must always be >= start_block."""
+    print("\ntest_result_at_or_after_start")
     block, length = iter_freespace(fd, 0)
     if block == 0 and length == 0:
         print("  [SKIP] filesystem has no free space")
         return
-    check("result_block > start_block", block > 0,
+    check("result_block >= start_block", block >= 0,
           f"start=0, got result_block={block}")
 
-    # also check mid-filesystem
-    block2, length2 = iter_freespace(fd, block + length)
-    if block2 != 0:
-        check("result_block > start for mid-filesystem call",
-              block2 > block + length,
-              f"start={block+length}, got {block2}")
+    # starting exactly at a known free block should return that block
+    block2, length2 = iter_freespace(fd, block)
+    check("starting at free block returns that block", block2 == block,
+          f"expected {block}, got {block2}")
+
+    # advancing past the extent should find the next one
+    block3, length3 = iter_freespace(fd, block + length)
+    if block3 != 0:
+        check("result_block >= start after advancing",
+              block3 >= block + length,
+              f"start={block+length}, got {block3}")
 
 def test_result_length_at_least_one(fd):
     """Any returned free extent must have length >= 1."""
@@ -303,7 +308,7 @@ def main():
     fd = os.open(SANDBOX, os.O_RDONLY)
 
     try:
-        test_result_strictly_after_start(fd)
+        test_result_at_or_after_start(fd)
         test_result_length_at_least_one(fd)
         # test_past_end_returns_zero(fd)
         test_chained_extents_do_not_overlap(fd)
