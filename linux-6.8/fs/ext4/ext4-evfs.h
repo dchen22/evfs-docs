@@ -1,5 +1,7 @@
 #include "ext4.h"
 
+#define NUM_MAX_EXT4_EXTENTS 128
+
 struct ext4_evfs_add_dentry {
     __u64 parent_inode_number;
     __u64 child_inode_number;
@@ -54,10 +56,9 @@ struct ext4_evfs_get_inode_extents {
 };
 
 struct ext4_evfs_inode_remap {
-    __u64 inode_number; // input
-    __u64 start_block;  // input
-    __u32 length;       // input
-    __u32 _padding;     // alignment
+    __u64 inode_number;                         // input
+    struct ext4_evfs_extent __user *extents;    // input: array of new extents
+    __u32 num_extents;                          // input: len(extents)
 };
 
 #define EXT4_IOC32_PRINTHELLO	_IO('f', 99)

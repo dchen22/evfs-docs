@@ -712,71 +712,119 @@ update_dentry_out_stop:
 	}
 	case EXT4_IOC_INODE_REMAP: {
 		struct ext4_evfs_inode_remap remap_info;
+		struct inode *target_inode = NULL;
+		bool inode_locked = false;
+		bool ext_tree_locked = false;
+		struct ext4_evfs_extent *kextents = NULL;
+		handle_t *handle = NULL;
+		int err = 0;
+
 		if (copy_from_user(&remap_info, (void __user *)arg, sizeof(remap_info))) {
 			return -EFAULT;
 		}
 
-		struct inode *target_inode = ext4_iget(sb, remap_info.inode_number, EXT4_IGET_NORMAL); 
+		/* User array of new extents */
+		if (remap_info.num_extents == 0 || remap_info.num_extents > NUM_MAX_EXT4_EXTENTS) {
+			err = -EINVAL;
+			pr_warn("evfs: Invalid number of extents: %d\n", remap_info.num_extents);
+			goto inode_remap_out;
+		}
+		kextents = kmalloc(
+			remap_info.num_extents * sizeof(struct ext4_evfs_extent), GFP_KERNEL
+		);
+		if (kextents == NULL) {
+			err = -ENOMEM;
+			pr_warn("evfs: kmalloc failed: %d\n", err);
+			goto inode_remap_out;
+		}
+		if (copy_from_user(kextents, 
+							remap_info.extents, 
+							remap_info.num_extents * sizeof(struct ext4_evfs_extent))) {
+			err = -EFAULT;
+			goto inode_remap_out;
+		}
+
+		target_inode = ext4_iget(sb, remap_info.inode_number, EXT4_IGET_NORMAL); 
 		if (IS_ERR(target_inode)) {
-			return PTR_ERR(target_inode);
+			err = PTR_ERR(target_inode);
+			goto inode_remap_out;
 		}
 
 		if (!ext4_test_inode_flag(target_inode, EXT4_INODE_EXTENTS)) {
-			iput(target_inode);
-			return -EOPNOTSUPP;
+			err = -EOPNOTSUPP;
+			goto inode_remap_out;
 		}
 
 		/* Affect up to 10 blocks */
-		handle_t *handle = ext4_journal_start(target_inode, EXT4_HT_MISC, 10);
+		handle = ext4_journal_start(target_inode, EXT4_HT_MISC, 10);
 		if (IS_ERR(handle)) {
-			iput(target_inode);
-			return PTR_ERR(handle);
+			err = PTR_ERR(handle);
+			goto inode_remap_out;
 		}
 
 		inode_lock(target_inode);	/* lock inode */
+		inode_locked = true;
 		down_write(&EXT4_I(target_inode)->i_data_sem);	/* lock extent tree with rw semaphore */
+		ext_tree_locked = true;
 
 		/* Remove all existing extents */
-		int err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
+		err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
 		if (err) {
 			pr_warn("evfs: ext4_ext_remove_space failed: %d\n", err);
 			goto inode_remap_out;
 		}
 
-		/* Insert new extent at logical block 0 */
-		struct ext4_extent new_extent;
-		new_extent.ee_block = cpu_to_le32(0);
-		new_extent.ee_len = cpu_to_le16(remap_info.length);
-		new_extent.ee_start_hi = cpu_to_le16(remap_info.start_block >> 32);
-		new_extent.ee_start_lo = cpu_to_le32(remap_info.start_block & 0xffffffffULL);
+		/* Inode removed of its data; set size to 0 */
+		target_inode->i_size = 0;
 
-		struct ext4_ext_path *path = NULL;
-		path = ext4_find_extent(target_inode, 0, &path, 0);
-		if (IS_ERR(path)) {
-			err = PTR_ERR(path);
-			path = NULL;
-			goto inode_remap_out;
-		}
+		ext4_lblk_t logical_block = 0;	/* Logical block that each new extent starts from */
+		for (int i = 0; i < remap_info.num_extents; i++) {
+			/* Insert new extent at logical block 0 */
+			struct ext4_extent new_extent;
+			new_extent.ee_block = cpu_to_le32(logical_block);
+			new_extent.ee_len = cpu_to_le16(kextents[i].length);
+			new_extent.ee_start_hi = cpu_to_le16(kextents[i].start_block >> 32);
+			new_extent.ee_start_lo = cpu_to_le32(kextents[i].start_block & 0xffffffffULL);
 
-		err = ext4_ext_insert_extent(handle, target_inode, &path, &new_extent, 0);
-		if (path) {
-			ext4_ext_drop_refs(path);
-			kfree(path);
-		}
-		if (err) {
-			pr_warn("evfs: ext4_ext_insert_extent failed: %d\n", err);
-			goto inode_remap_out;
-		}
+			struct ext4_ext_path *path = NULL;
+			path = ext4_find_extent(target_inode, logical_block, &path, 0);
+			if (IS_ERR(path)) {
+				err = PTR_ERR(path);
+				path = NULL;
+				goto inode_remap_out;
+			}
 
-		/* update inode size and mark dirty */
-		target_inode->i_size = (loff_t)remap_info.length * sb->s_blocksize;
+			err = ext4_ext_insert_extent(handle, target_inode, &path, &new_extent, 0);
+			if (path) {
+				ext4_ext_drop_refs(path);
+				kfree(path);
+			}
+			if (err) {
+				pr_warn("evfs: ext4_ext_insert_extent failed: %d\n", err);
+				goto inode_remap_out;
+			}
+
+			/* update inode size and mark dirty */
+			target_inode->i_size += (loff_t)(kextents[i].length) * sb->s_blocksize;
+
+			/* Update starting logical block for the next extent */
+			logical_block += kextents[i].length;
+		}
+		
 		err = ext4_mark_inode_dirty(handle, target_inode);
 
 	inode_remap_out:
-		up_write(&EXT4_I(target_inode)->i_data_sem);
-		inode_unlock(target_inode);
-		ext4_journal_stop(handle);
-		iput(target_inode);
+		kfree(kextents);
+		if (!IS_ERR_OR_NULL(target_inode)) {
+			if (ext_tree_locked) up_write(&EXT4_I(target_inode)->i_data_sem);
+			if (inode_locked) inode_unlock(target_inode);
+		}
+		if (!IS_ERR_OR_NULL(handle)) {
+			ext4_journal_stop(handle);
+		}
+		if (!IS_ERR_OR_NULL(target_inode)) {
+			iput(target_inode);
+		}
 		return err;
 	}
     default:
