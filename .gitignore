@@ -29,4 +29,8 @@ workarea/test-update-behaviour
 workarea/update_dentry
 workarea/build-log.txt
 
+workarea/tests/loop_remap
+workarea/tests/test_inode_remap
+workarea/tests/verify-extents
+
 config-backup

@@ -18,6 +18,7 @@
 #include "ext4-evfs.h"
 #include "../internal.h"
 #include "ext4_extents.h"
+#include "../../include/linux/pagemap.h"
 
 int ext4_add_entry(handle_t *handle, struct dentry *dentry,
 			  struct inode *inode);
@@ -32,6 +33,7 @@ struct buffer_head *ext4_find_entry(struct inode *dir,
 struct buffer_head *
 ext4_read_inode_bitmap(struct super_block *sb, ext4_group_t block_group);
 void ext4_ext_drop_refs(struct ext4_ext_path *path);
+inline int filemap_write_and_wait(struct address_space *mapping);
 
 long __ext4_evfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct inode *inode = file_inode(filp);
@@ -632,6 +634,12 @@ update_dentry_out_stop:
 	}
 	case EXT4_IOC_GET_INODE_EXTENTS: {
 		struct ext4_evfs_get_inode_extents extent_info;
+		struct ext4_ext_path *path = NULL;
+		__u32 count = 0;
+		ext4_lblk_t block = 0;
+		bool islocked_extent_tree = false;
+		int err = 0;
+
 		if (copy_from_user(&extent_info, (void __user *)arg, sizeof(extent_info))) {
 			return -EFAULT;
 		}
@@ -648,9 +656,9 @@ update_dentry_out_stop:
 			return -EOPNOTSUPP;
 		}
 
-		struct ext4_ext_path *path = NULL;
-		__u32 count = 0;
-		ext4_lblk_t block = 0;
+		/* Lock extent tree */
+		down_read(&EXT4_I(target_inode)->i_data_sem);
+		islocked_extent_tree = true;
 
 		while (count < extent_info.max_num_extents) {
 			// find which extent covers <block>, or the next that follows it	
@@ -679,10 +687,8 @@ update_dentry_out_stop:
 			extent.length = ext4_ext_get_actual_len(ex);
 
 			if (copy_to_user(&extent_info.extents[count], &extent, sizeof(extent))) {
-				ext4_ext_drop_refs(path);
-				kfree(path);
-				iput(target_inode);
-				return -EFAULT;
+				err = -EFAULT;
+				goto get_inode_extents_cleanup;
 			}
 
 			count++;
@@ -697,18 +703,22 @@ update_dentry_out_stop:
 			// ext4_ext_drop_refs(path);
 		}
 
+	get_inode_extents_cleanup:
+
+		if (islocked_extent_tree) { up_read(&EXT4_I(target_inode)->i_data_sem); )}
+
 		if (path) {
 			ext4_ext_drop_refs(path);
 			kfree(path);
 		}
 
-		iput(target_inode);
+		if (target_inode) { iput(target_inode); }
 
 		extent_info.result_num_extents = count;
 		if (copy_to_user((void __user *)arg, &extent_info, sizeof(extent_info))) {
 			return -EFAULT;
 		}
-		return 0;
+		return err;
 	}
 	case EXT4_IOC_INODE_REMAP: {
 		struct ext4_evfs_inode_remap remap_info;
@@ -767,6 +777,12 @@ update_dentry_out_stop:
 		down_write(&EXT4_I(target_inode)->i_data_sem);	/* lock extent tree with rw semaphore */
 		ext_tree_locked = true;
 
+		/* Prevent new writes during page invalidation */
+		filemap_write_and_wait(&target_inode->i_data);
+
+		/* Invalidate stale page cache */
+		invalidate_inode_pages2(target_inode->i_mapping);
+
 		/* Remove all existing extents */
 		err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
 		if (err) {
@@ -812,6 +828,13 @@ update_dentry_out_stop:
 		}
 		
 		err = ext4_mark_inode_dirty(handle, target_inode);
+		if (err) {
+			goto inode_remap_out;
+		}
+
+		ext4_journal_stop(handle);
+		handle = NULL;  /* already stopped, don't stop again in cleanup */
+		write_inode_now(target_inode, 1);  /* 1 = wait for completion */
 
 	inode_remap_out:
 		kfree(kextents);
