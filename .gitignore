@@ -31,6 +31,6 @@ workarea/build-log.txt
 
 workarea/tests/loop_remap
 workarea/tests/test_inode_remap
-workarea/tests/verify-extents
+workarea/tests/verify_extents
 
 config-backup
