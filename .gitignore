@@ -15,6 +15,7 @@ linux-6.8/fs/ext4/*
 !linux-6.8/fs/ext4/Makefile
 !linux-6.8/fs/ext4/namei.c
 !linux-6.8/fs/ext4/extents.c
+!linux-6.8/fs/ext4/super.c
 
 workarea/add_dentry
 workarea/delete_dentry
