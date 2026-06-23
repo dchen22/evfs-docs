@@ -705,7 +705,7 @@ update_dentry_out_stop:
 
 	get_inode_extents_cleanup:
 
-		if (islocked_extent_tree) { up_read(&EXT4_I(target_inode)->i_data_sem); )}
+		if (islocked_extent_tree) { up_read(&EXT4_I(target_inode)->i_data_sem); }
 
 		if (path) {
 			ext4_ext_drop_refs(path);
@@ -784,11 +784,14 @@ update_dentry_out_stop:
 		invalidate_inode_pages2(target_inode->i_mapping);
 
 		/* Remove all existing extents */
-		err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
-		if (err) {
-			pr_warn("evfs: ext4_ext_remove_space failed: %d\n", err);
-			goto inode_remap_out;
+		if (target_inode->i_blocks > 0) {
+			err = ext4_ext_remove_space(target_inode, 0, EXT_MAX_BLOCKS - 1);
+			if (err) {
+				pr_warn("evfs: ext4_ext_remove_space failed: %d\n", err);
+				goto inode_remap_out;
+			}
 		}
+		
 
 		/* Inode removed of its data; set size to 0 */
 		target_inode->i_size = 0;

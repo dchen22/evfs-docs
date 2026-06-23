@@ -32,7 +32,7 @@ struct ext4_evfs_iter_freespace {
 int main(int argc, char* argv[]) {
     int fd = -1;
     int bd_fd = -1;
-    struct ext4_evfs_extent *extents;
+    struct ext4_evfs_extent *extents = NULL;
     struct ext4_evfs_inode_remap remap_info = {0};
     struct ext4_evfs_iter_freespace iter_freespace_info = {0};
     int err = 1;
@@ -74,6 +74,8 @@ int main(int argc, char* argv[]) {
         ssize_t bytes_written;
         void *buf;
 
+        printf("Finding free space...\n");
+
         /* Randomly find free space */
         iter_freespace_info.start_block = rand();
         if (ioctl(fd, EXT4_IOC_ITER_FREESPACE, &iter_freespace_info) < 0) {
@@ -84,11 +86,15 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        printf("Claiming free space\n");
+
         /* Claim the discovered free space */
         if (ioctl(fd, EXT4_IOC_FLIP_BLOCK_BIT, &(iter_freespace_info.result_block)) < 0) {
             perror("ioctl");
             goto cleanup;
         }
+
+        printf("Writing to free space...\n");
 
         /* Write stuff to the discovered free space */
         byte_offset = (off_t)iter_freespace_info.result_block * BLOCK_SIZE;
@@ -105,6 +111,8 @@ int main(int argc, char* argv[]) {
             free(buf);
             goto cleanup;
         }
+
+        printf("Remapping inode...\n");
 
         /* Remap inode */
         (remap_info.extents)[0].start_block = iter_freespace_info.result_block;
