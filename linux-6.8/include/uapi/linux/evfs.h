@@ -137,7 +137,10 @@ struct ext4_evfs_ext_mv_args
 		unsigned long long exp_iver;
 		struct ext4_evfs_ext ext;
 	} in;
-	struct {} out;
+	struct {
+		unsigned int num_exts; 
+		struct ext4_evfs_ext * exts;
+	} out;
 	
 };
 
@@ -153,7 +156,7 @@ struct ext4_evfs_ext_mv_args
 #define EXT4_EVFS_DEN_DELETE _IOW('f', 108, struct ext4_evfs_de_delete_args)
 #define EXT4_EVFS_DEN_UPDATE _IOW('f', 109, struct ext4_evfs_de_update_args)
 #define EXT4_EVFS_EXT_READ _IOWR('f', 110, struct ext4_evfs_ext_read_args)
-#define EXT4_EVFS_EXT_MV _IOW('f', 111, struct ext4_evfs_ext_mv_args)
+#define EXT4_EVFS_EXT_MV _IOWR('f', 111, struct ext4_evfs_ext_mv_args)
 
 #endif
 

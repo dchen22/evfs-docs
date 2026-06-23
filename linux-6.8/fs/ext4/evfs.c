@@ -84,10 +84,10 @@ static long __evfs_inode_untrack_nolock(struct inode * ino)
 static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 				struct ext4_evfs_ext * curr, struct ext4_evfs_ext * next)
 {
-	int ret = 0, err = 0;
+	int ret = 0, err = 0, eof = 1;
 	struct ext4_ext_path * path = NULL;
-	unsigned int len = curr->len;
 	ext4_lblk_t lblk = curr->log_start;
+	unsigned int len = curr->len;
 
 	// invalidate extent status tree
 	ext4_es_remove_extent(inode, lblk, len);
@@ -96,17 +96,18 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		path = ext4_find_extent(inode, lblk, NULL, EXT4_EX_NOCACHE);
 		if (IS_ERR(path)) {
 			ret = PTR_ERR(path);
-			goto term;
+			goto finish;
 		}
 
 		struct ext4_extent * ex = path[path->p_depth].p_ext;
 		if (!ex) {
-			ret = -ENOENT;
-			goto term;
+			ret = eof;
+			goto finish;
 		}
 
-		ext4_lblk_t e_blk = le32_to_cpu(ex->ee_block);
-		unsigned int e_len = ext4_ext_get_actual_len(ex);
+		// NOTE: volatile is used for debugging
+		volatile ext4_lblk_t e_blk = le32_to_cpu(ex->ee_block);
+		volatile unsigned int e_len = ext4_ext_get_actual_len(ex);
 
 		// DONE: handle holes
 		// if before the hole, move the cursor to the current
@@ -114,12 +115,11 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		// to the next extent.
 		if (lblk < e_blk) {
 			lblk = e_blk;
-			goto cont;
 		} else if (lblk >= e_blk + e_len) {
 			lblk = ext4_ext_next_allocated_block(path);
 			if (lblk >= EXT_MAX_BLOCKS) {
-				ret = -ENOENT;
-				goto term;
+				ret = eof;
+				goto finish;
 			}
 
 			goto cont;
@@ -137,7 +137,7 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		if (e_blk < lblk) {
 			if ((err = ext4_force_split_extent_at(handle, inode, &path, lblk, 0))) {
 				ret = err;
-				goto term;
+				goto finish;
 			}
 
 			goto cont;
@@ -151,20 +151,15 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		if (e_blk + e_len > lblk + len) {
 			if ((err = ext4_force_split_extent_at(handle, inode, &path, lblk + len, 0))) {
 				ret = err;
-				goto term;
+				goto finish;
 			}
 
 			goto cont;
 		}
 
-		curr->phy_start += lblk - curr->log_start;
-		curr->log_start = lblk;
-		curr->len = len;
-
-		// DONE: swap the extent block
+		// DONE: set the new physical start
 		unsigned long long tmp = ext4_ext_pblock(ex);
-		ext4_ext_store_pblock(ex, curr->phy_start);
-		curr->phy_start = tmp;
+		ext4_ext_store_pblock(ex, curr->phy_start + lblk - curr->log_start);
 
 		// DONE: try merging the extent
 		ext4_ext_try_to_merge(handle, inode, path, ex);
@@ -172,25 +167,28 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		// DONE: mark the extent as dirty
 		if ((err = ext4_ext_dirty(handle, inode, &(path[path->p_depth])))) {
 			ret = err;
-			goto term;
+			goto finish;
 		}
 
 		goto set_next;
-
-		term:
-		memset(curr, 0, sizeof(struct ext4_evfs_ext));
-		goto finish;
 
 		set_next:
 		if (lblk + curr->len > e_blk + e_len) {
 			// specified extent endpoint goes beyond current
 			// extent endpoint
-			next->phy_start += e_len;
+			next->phy_start = curr->phy_start + e_len;
 			next->log_start = e_blk + e_len;
-			next->len = lblk + curr->len - next->log_start;
+			next->len = curr->log_start + curr->len - next->log_start;
 		} else {
 			finish:
 			memset(next, 0, sizeof(struct ext4_evfs_ext));
+		}
+
+		// complete the swap
+		if (ret == 0 && err == 0) {
+			curr->phy_start = tmp;
+			curr->log_start = lblk;
+			curr->len = len;
 		}
 
 		done = true;
@@ -1348,11 +1346,8 @@ long evfs_extent_read(struct super_block * sb, struct ext4_evfs_ext_read_args * 
  *
  * NOTE: see fs/ext4/extents.c:ext4_move_extent for how data is copied
  * NOTE: see fs/ext4/extents.c:ext4_swap_extent for how extent is swapped
- * TODO: ask prof if we're doing pure swap or enable insertion?
- * ----: if insertion needs to be enabled: compute the number
- * ----: of blocks to be added
  * NOTE: since we're 'replacing', we do pure swap for now
- * TODO: enable outputing the old extents so user space know which blocks
+ * DONE: enable outputing the old extents so user space know which blocks
  * ----: to release
  * TODO: add support for indexed based inode
  *
@@ -1389,24 +1384,19 @@ long evfs_extent_move(struct super_block * sb, struct ext4_evfs_ext_mv_args * ar
 	// DONE: Wait for all existing direct I/O workers
 	inode_dio_wait(inode);
 
-	struct ext4_evfs_ext next, ccurr;
-	struct ext4_evfs_ext curr = args->in.ext;
-	memcpy(&ccurr, &curr, sizeof(struct ext4_evfs_ext)); //create a copy
+	struct ext4_evfs_ext next, curr;
+	memcpy(&curr, &(args->in.ext), sizeof(struct ext4_evfs_ext)); //create a copy
+	args->out.num_exts = 0;
+	while (curr.len != 0 && args->out.num_exts < args->in.ext.len) {
+		if ((err = __evfs_extent_map(handle, inode, &curr, &next)) < 0) {
+			ret = err;
+			break;
+		}
 
-	repeat:
-	if ((err = __evfs_extent_map(handle, inode, &ccurr, &next))) {
-		ret = err;
-		goto stop_journal;
-	}
-
-	// TODO: copy data
-
-	if (next.len != 0) {
-		memcpy(&ccurr, &next, sizeof(struct ext4_evfs_ext));
-		goto repeat;
+		memcpy(&(args->out.exts[args->out.num_exts++]), &curr, sizeof(struct ext4_evfs_ext));
+		memcpy(&curr, &next, sizeof(struct ext4_evfs_ext));
 	}
 	
-stop_journal:
 	if ((err = ext4_journal_stop(handle))) {
 		ret = err;
 	}
@@ -1514,18 +1504,25 @@ long ext4_ioctl_evfs(unsigned int cmd, struct inode * ino, struct super_block * 
 			struct ext4_evfs_ext_read_args k_args;
 			struct ext4_evfs_ext_read_args __user * u_args =
 				(struct ext4_evfs_ext_read_args __user *) arg;
+			void __user * u_exts;
+
 			if (copy_from_user(&(k_args.in), &(u_args->in), sizeof(k_args.in)))
 				return -EFAULT;
 			
-			ret = evfs_extent_read(sb, &k_args);
-			if (copy_to_user(&(u_args->out), &(k_args.out), sizeof(k_args.out)))
+			if (copy_from_user(&u_exts, &(u_args->out.exts), sizeof(void *)))
 				return -EFAULT;
-
-			size_t ext_arr_size = sizeof(struct ext4_evfs_ext) * k_args.out.num_exts;
+			
+			size_t ext_arr_size = sizeof(struct ext4_evfs_ext) * k_args.in.max_num_exts;
 			k_args.out.exts = (struct ext4_evfs_ext *) kmalloc(ext_arr_size, GFP_KERNEL);
-			if (copy_to_user(u_args->out.exts, k_args.out.exts, ext_arr_size))
+
+			ret = evfs_extent_read(sb, &k_args);
+			if (copy_to_user(&(u_args->out.num_exts), &(k_args.out.num_exts), sizeof(unsigned int)))
 				return -EFAULT;
 
+			if (copy_to_user(u_exts, k_args.out.exts, ext_arr_size))
+				return -EFAULT;
+
+			kfree(k_args.out.exts);
 			return ret;
 		}
 		case EXT4_EVFS_EXT_MV:
@@ -1533,10 +1530,25 @@ long ext4_ioctl_evfs(unsigned int cmd, struct inode * ino, struct super_block * 
 			struct ext4_evfs_ext_mv_args k_args;
 			struct ext4_evfs_ext_mv_args __user * u_args =
 				(struct ext4_evfs_ext_mv_args __user *) arg;
+			void __user * u_exts;
+
 			if (copy_from_user(&(k_args.in), &(u_args->in), sizeof(k_args.in)))
 				return -EFAULT;
+
+			if (copy_from_user(&u_exts, &(u_args->out.exts), sizeof(void *)))
+				return -EFAULT;
+			
+			size_t ext_arr_size = sizeof(struct ext4_evfs_ext) * k_args.in.ext.len;
+			k_args.out.exts = (struct ext4_evfs_ext *) kmalloc(ext_arr_size, GFP_KERNEL);
 			
 			ret = evfs_extent_move(sb, &k_args);
+			if (copy_to_user(&(u_args->out.num_exts), &(k_args.out.num_exts), sizeof(unsigned int)))
+				return -EFAULT;			
+
+			if (copy_to_user(u_exts, k_args.out.exts, ext_arr_size))
+				return -EFAULT;
+
+			kfree(k_args.out.exts);
 			return ret;
 		}
 		default:

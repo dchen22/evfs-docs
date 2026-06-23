@@ -56,15 +56,22 @@ else
 	rm build/balloc.x build/bfree.x build/iver.x build/extent_move.c.x
 	make build/balloc.x build/bfree.x build/iver.x build/extent_move.c.x &> /dev/null
 	
-	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 count=4 conv=fdatasync 2>/dev/null
-	
+	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 count=2 conv=fdatasync 2>/dev/null	
+	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 seek=3 count=2 conv=fdatasync 2>/dev/null
+	ino_num=$(stat $file1 | head -n3 | tail -n1 | awk '{print $4}')
+	sudo sync
+
 	echo -e "\n=== before :: file 1 ==="
 	hexdump -C $file1
 
-	ino_num=$(stat $file1 | head -n3 | tail -n1 | awk '{print $4}')
+	echo ""
+	res=$(sudo debugfs -n -R "stat <$ino_num>" $TEVFS_IMAGEPATH)
+	echo -e "$res"
 	
-	echo -e "\nrunning build/balloc.x 2001 $TEVFS_MOUNTPT"
-	build/balloc.x 2001 $TEVFS_MOUNTPT
+	echo -e "\nrunning build/balloc.x 2001-2004 $TEVFS_MOUNTPT"
+	for ((i=2001; i < 2005; i++)); do
+		build/balloc.x $i $TEVFS_MOUNTPT
+	done
 
 	sudo sync
 	echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
@@ -73,25 +80,32 @@ else
 	iver=$(build/iver.x $file1)
 	echo -e "$iver"
 
-	echo -e "\nrunning build/extent_move.c.x $iver $ino_num 0 2001 1 $TEVFS_MOUNTPT"
-	build/extent_move.c.x $iver $ino_num 0 2001 1 $TEVFS_MOUNTPT
+	echo -e "\nrunning build/extent_move.c.x $iver $ino_num 1 2001 5 $TEVFS_MOUNTPT"
+
+	build/extent_move.c.x $iver $ino_num 1 2001 5 $TEVFS_MOUNTPT
 	
-	echo "exit code: $?"
+	echo -e "\nexit code: $?"
 	sudo sync
 
-	# TODO: free the block that are swapped out
-	# NOTE: below is some temporary command for demo
-	hexdump -C $file1
-	sudo debugfs -n -R "stat <$ino_num>" $TEVFS_IMAGEPATH
-fi
+	echo -e "\n=== after :: file 1 ==="
+	res=$(hexdump -C $file1)
+	echo -e "$res"
 
-# TODO: add fsck and debugfs check to determine the disk is still clean
+	echo ""
+	sudo debugfs -n -R "stat <$ino_num>" $TEVFS_IMAGEPATH | xargs -I {} echo "{}"
+
+	# TODO free the blocks return by the program
+fi
 
 echo ""
 
 if ! sudo -E ./img-umount.sh; then
 	exit 1
 fi
+
+echo ""
+echo "------- new fsck test ---------"
+sudo fsck.ext4 -f -n $TEVFS_IMAGEPATH
 
 if echo $res | grep "0400" > /dev/null; then
 	echo "OK"

@@ -47,6 +47,7 @@
 #include <linux/compiler.h>
 
 #include "evfs-bmt.h"
+#include "evfs-dent.h"
 
 /*
  * The fourth extended filesystem constants/structures
