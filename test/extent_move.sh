@@ -58,7 +58,11 @@ else
 	
 	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 count=2 conv=fdatasync 2>/dev/null	
 	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 seek=3 count=2 conv=fdatasync 2>/dev/null
+	sudo sync
+
 	ino_num=$(stat $file1 | head -n3 | tail -n1 | awk '{print $4}')
+
+	tr '\0' 'A' < /dev/zero | dd of=$file1 bs=1024 seek=6 count=2 conv=fdatasync 2>/dev/null
 	sudo sync
 
 	echo -e "\n=== before :: file 1 ==="
@@ -68,8 +72,9 @@ else
 	res=$(sudo debugfs -n -R "stat <$ino_num>" $TEVFS_IMAGEPATH)
 	echo -e "$res"
 	
-	echo -e "\nrunning build/balloc.x 2001-2004 $TEVFS_MOUNTPT"
-	for ((i=2001; i < 2005; i++)); do
+	e_len=5
+	echo -e "\nrunning build/balloc.x 2001-2005 $TEVFS_MOUNTPT"
+	for (( i=2001; i < $((2001 + $e_len)); i++ )); do
 		build/balloc.x $i $TEVFS_MOUNTPT
 	done
 
@@ -80,16 +85,15 @@ else
 	iver=$(build/iver.x $file1)
 	echo -e "$iver"
 
-	echo -e "\nrunning build/extent_move.c.x $iver $ino_num 1 2001 5 $TEVFS_MOUNTPT"
-
-	build/extent_move.c.x $iver $ino_num 1 2001 5 $TEVFS_MOUNTPT
+	echo -e "\nrunning build/extent_move.c.x $iver $ino_num 1 2001 $e_len $TEVFS_MOUNTPT"
+	res=$(build/extent_move.c.x $iver $ino_num 1 2001 $e_len $TEVFS_MOUNTPT)
+	echo -e "$res"
 	
 	echo -e "\nexit code: $?"
 	sudo sync
 
 	echo -e "\n=== after :: file 1 ==="
-	res=$(hexdump -C $file1)
-	echo -e "$res"
+	hexdump -C $file1
 
 	echo ""
 	sudo debugfs -n -R "stat <$ino_num>" $TEVFS_IMAGEPATH | xargs -I {} echo "{}"
@@ -103,13 +107,28 @@ if ! sudo -E ./img-umount.sh; then
 	exit 1
 fi
 
+
 echo ""
 echo "------- new fsck test ---------"
 sudo fsck.ext4 -f -n $TEVFS_IMAGEPATH
 
-if echo $res | grep "0400" > /dev/null; then
-	echo "OK"
-else
-	echo "Failed"
-fi
 
+if [[ $1 == "-n" || $1 == "--native" ]]; then
+	if echo $res | grep "0400" > /dev/null; then
+		echo "OK"
+	else
+		echo "Failed"
+	fi
+else
+	nums=$(echo -e "$res" | tail +2 | awk '{print $3}')
+        sum=0
+	for num in $nums; do
+		sum=$(($sum + $num))
+	done
+
+	if [ "$sum" -eq "$e_len" ]; then
+		echo "OK"
+	else
+		echo "Failed"
+	fi
+fi

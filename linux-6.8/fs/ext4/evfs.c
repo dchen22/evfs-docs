@@ -113,8 +113,10 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		// if before the hole, move the cursor to the current
 		// hole, if the cursor is after the hole, move the cursor
 		// to the next extent.
+		unsigned int jump = 0;
 		if (lblk < e_blk) {
-			lblk = e_blk;
+			jump = e_blk - lblk;
+			goto ret_jmp;
 		} else if (lblk >= e_blk + e_len) {
 			lblk = ext4_ext_next_allocated_block(path);
 			if (lblk >= EXT_MAX_BLOCKS) {
@@ -122,10 +124,26 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 				goto finish;
 			}
 
+			jump = lblk - (e_blk + e_len);
+			if (jump > 0) {
+				ret_jmp:
+				next->phy_start = curr->phy_start + jump;
+				next->log_start = curr->log_start + jump;
+				next->len = curr->len - jump;
+				curr->len = jump;
+				done = true;
+			}
+
 			goto cont;
 		}
 
 		// get to the next length
+		// printk(KERN_INFO "curr: %p\n", (void *) curr); // DEBUG
+		// printk(KERN_INFO "curr->log_start: %u\n", curr->log_start);
+		if (curr->log_start + len <= lblk) {
+			ret = eof;
+			goto finish;
+		}
 		len = curr->log_start + len - lblk;
 
 		// DONE: split bc the ext physical blk can be in other state
@@ -176,7 +194,7 @@ static long __evfs_extent_map(handle_t * handle, struct inode * inode,
 		if (lblk + curr->len > e_blk + e_len) {
 			// specified extent endpoint goes beyond current
 			// extent endpoint
-			next->phy_start = curr->phy_start + e_len;
+			next->phy_start = curr->phy_start + lblk - curr->log_start + e_len;
 			next->log_start = e_blk + e_len;
 			next->len = curr->log_start + curr->len - next->log_start;
 		} else {
@@ -1514,6 +1532,7 @@ long ext4_ioctl_evfs(unsigned int cmd, struct inode * ino, struct super_block * 
 			
 			size_t ext_arr_size = sizeof(struct ext4_evfs_ext) * k_args.in.max_num_exts;
 			k_args.out.exts = (struct ext4_evfs_ext *) kmalloc(ext_arr_size, GFP_KERNEL);
+			if (k_args.out.exts == NULL) return -ENOMEM;
 
 			ret = evfs_extent_read(sb, &k_args);
 			if (copy_to_user(&(u_args->out.num_exts), &(k_args.out.num_exts), sizeof(unsigned int)))
@@ -1540,6 +1559,7 @@ long ext4_ioctl_evfs(unsigned int cmd, struct inode * ino, struct super_block * 
 			
 			size_t ext_arr_size = sizeof(struct ext4_evfs_ext) * k_args.in.ext.len;
 			k_args.out.exts = (struct ext4_evfs_ext *) kmalloc(ext_arr_size, GFP_KERNEL);
+			if (k_args.out.exts == NULL) return -ENOMEM;
 			
 			ret = evfs_extent_move(sb, &k_args);
 			if (copy_to_user(&(u_args->out.num_exts), &(k_args.out.num_exts), sizeof(unsigned int)))
