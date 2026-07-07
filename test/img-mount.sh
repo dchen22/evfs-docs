@@ -19,5 +19,5 @@ else
 	mount -o loop,data=journal $TEVFS_IMAGEPATH $TEVFS_MOUNTPT
 fi
 
-chown code:code $TEVFS_MOUNTPT
+chown $SUDO_USER:$SUDO_USER $TEVFS_MOUNTPT
 
