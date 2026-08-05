@@ -25,6 +25,9 @@ IMG=${1:?usage: fragment.sh <image_path> [profile] [seed]}
 PROFILE=${2:-agrawal}
 SEED=${3:-42}
 
+DURATION=10  # Minutes (hard cap)
+UTILIZATION=0.2  # 20% full — leaves ~16 GB free for filebench's 1M-file dataset
+
 GERIATRIX_PROFILES="/home/evie/geriatrix/profiles"
 
 # ── locate geriatrix ──────────────────────────────────────────────────────────
@@ -71,13 +74,13 @@ e2freefrag "$IMG" 2>/dev/null || true
 
 # ── run Geriatrix ─────────────────────────────────────────────────────────────
 # -n  disk size in bytes
-# -u  target utilisation (0.7 = 70% full); leaves headroom for filebench files
+# -u  target utilisation (0.2 = 20% full); leaves ~16 GB free for filebench files
 # -r  random seed
 # -m  mount point (no trailing /)
 # -a/s/d  distribution files for age, size, directory depth
 # -x/y/z  output files for the resulting distributions
 # -t  threads (1 = fully reproducible; >1 is faster but non-deterministic)
-# -i  aging iterations (3 = 3× disk size worth of creates/deletes)
+# -i  aging iterations (10 = 10× disk size worth of creates/deletes; more cycles = deeper fragmentation)
 # -f 0  real mode (not fake/dry-run)
 # -p 0  no idle time injection
 # -c 0.9  stop at 90% convergence (faster than perfect convergence)
@@ -85,10 +88,10 @@ e2freefrag "$IMG" 2>/dev/null || true
 # -w 60  hard time limit: 60 minutes
 # -b posix  POSIX backend
 echo ""
-echo "=== Running Geriatrix (profile=$PROFILE seed=$SEED util=70% max=60min) ==="
+echo "=== Running Geriatrix (profile=$PROFILE seed=$SEED util=$(echo $UTILIZATION*100 | bc)% max=${DURATION}min) ==="
 "$GERIATRIX" \
     -n "$DISK_BYTES" \
-    -u 0.2 \
+    -u "$UTILIZATION" \
     -r "$SEED" \
     -m "$MOUNTPT" \
     -a "$AGE_FILE" \
@@ -98,12 +101,12 @@ echo "=== Running Geriatrix (profile=$PROFILE seed=$SEED util=70% max=60min) ===
     -y /tmp/geriatrix_size.out \
     -z /tmp/geriatrix_dir.out \
     -t 1 \
-    -i 3 \
+    -i 100 \
     -f 0 \
     -p 0 \
     -c 0.9 \
     -q 0 \
-    -w 2 \
+    -w "$DURATION" \
     -b posix
 
 sync

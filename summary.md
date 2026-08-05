@@ -166,40 +166,41 @@ Profile files live in `~/geriatrix/profiles/{agrawal,dabre,douceur,grundman,meye
   runs Geriatrix (default: `agrawal`, seed 42, 70% utilisation, 2-minute cap),
   reports `e2freefrag` histogram before and after.
 
-#### Pilot run results (agrawal profile, 2 min, seed=42)
+#### Fragmentation results
 
-Geriatrix ran for exactly 2 minutes on the 20 GB image, performing 210,000
-operations (3 disk overwrites = ~60 GB of create/delete workload), reaching
-90% chi-squared convergence.
+Two runs performed. The second run used `-u 0.2` (20% fill) to leave headroom
+for filebench's 1M-file dataset (~16 GB) and `-i 10` for deeper fragmentation.
 
-| Metric | Pre-aging (fresh) | Post-aging |
-|---|---|---|
-| Free space | 96.9% (20.3 M blocks) | 26.9% (5.6 M blocks) |
-| Free extents | 176 | **18,297** |
-| Avg free extent size | 115 MB | **308 KB** |
-| Max free extent size | 128 MB | 16 MB |
-| Min free extent size | 4.5 MB | **1 KB** |
+**Key insight on file vs. free-space fragmentation**: Geriatrix's own files
+always show avg extents/file ≈ 1.00 (contiguous) because they were written
+sequentially. The fragmentation it produces is in the **free space** — scattered
+holes from the create/delete cycles. New files written into this space (i.e.,
+filebench's files) will be fragmented. `measure_fragmentation.sh` should be run
+after filebench populates to observe the effect.
 
-Free-space fragmentation is severe: 104× more free extents, each 374× smaller
-on average. This is the input state for the aged-filesystem benchmark scenarios.
+| Metric | Fresh image | Post-aging (80% util) | Post-aging (20% util, current) |
+|---|---|---|---|
+| Free space | 96.9% | 16.6% | ~80% |
+| Free extents | 176 | 18,625 | in progress |
+| Avg free extent | 115 MB | 187 KB | in progress |
+| File fragmentation score | 1.00 | 1.00 | 1.00 (Geriatrix files) |
 
-**Free-space histogram (post-aging):**
-```
- 1K...  2K:  5035 extents   (0.09% of free blocks)
- 2K...  4K:  3042 extents   (0.11%)
- 8K... 16K:  2366 extents   (0.34%)
-32K... 64K:  1892 extents   (1.07%)
- 1M...  2M:   590 extents  (13.90%)
- 2M...  4M:   684 extents  (28.93%)
- 4M...  8M:   353 extents  (32.24%)
-```
+The 80% run left only 3.4 GB free — not enough for filebench. The 20% run
+(currently executing) leaves ~16 GB free.
+
+#### Fragmentation score metric
+
+Measured with `measure_fragmentation.sh`:
+- **Avg extents/file** — primary score; 1.0 = perfectly contiguous
+- **% files with >1 extent** — secondary; counts files with any fragmentation
+- **`e2freefrag` histogram** — free-space fragmentation (run on unmounted image)
 
 #### Snapshot workflow
 
 ```bash
-sudo ./test/filebench/setup_img.sh
-sudo ./test/filebench/fragment.sh evfs-sandbox-20gb.img
-cp evfs-sandbox-20gb.img evfs-aged-snap.img    # save aged state
+sudo ./test/filebench/setup_img.sh              # reformat fresh
+sudo ./test/filebench/fragment.sh evfs-sandbox-20gb.img   # age it
+cp evfs-sandbox-20gb.img evfs-aged-snap.img     # snapshot aged state
 # restore before each benchmark run:
 cp evfs-aged-snap.img evfs-sandbox-20gb.img
 sudo mount -o loop,data=writeback evfs-sandbox-20gb.img evfs-sandbox-20gb
@@ -207,20 +208,76 @@ sudo mount -o loop,data=writeback evfs-sandbox-20gb.img evfs-sandbox-20gb
 
 ---
 
-### Step 2: defragmentation algorithm
+### Step 2 (immediate focus): defragmentation algorithm
 
-Once aging is working and we have a measurable fragmented state, build a
-defragmenter on top of `EXT4_EVFS_EXT_MV`:
+Build `test/src/defrag.c` — a userspace defragmenter using evfs ioctls.
 
-1. **Find fragmented files** — `FS_IOC_FIEMAP`; skip files with 1 contiguous extent
-2. **Find free run** — `EXT4_EVFS_FSP_ITER`; need run ≥ file size (or extent size
-   for per-extent mode)
-3. **Claim blocks** — `EXT4_EVFS_BLK_ALLOC` per block; retry on `-EEXIST`
-4. **Copy data** — read from old physical blocks, write to new ones (required
-   because `EXT_MV` moves the pointer, not the data)
-5. **Remap** — `EXT4_EVFS_EXT_MV` with `exp_iver` from step 1; retry on `-EAGAIN`
-6. **Free old blocks** — `EXT4_EVFS_BLK_FREE`
+#### High-level structure
 
-Key design decisions to resolve: whole-file vs. per-extent granularity; retry
-budget on `-EAGAIN`; live vs. offline mode (live needs the retry loop;
-offline on a read-only mount does not).
+```
+for each file in filesystem:
+    score = fiemap_extent_count(file)
+    if score <= FRAG_THRESHOLD:
+        continue                      // skip unfragmented files
+    defrag_file(mountfd, file)
+```
+
+**Fragmentation threshold**: skip files with extent count ≤ `FRAG_THRESHOLD`
+(e.g., 1 — defrag any file with >1 extent; or a higher value to skip lightly
+fragmented files and focus on worst cases).
+
+#### Per-file defragmentation algorithm
+
+```
+defrag_file(mountfd, path):
+    1. FIEMAP(path)  →  get current extents: [(log, phy, len), ...]
+                         and iversion (exp_iver)
+       if fm_mapped_extents == 1: return  // already contiguous, skip
+
+    2. FSP_ITER(mountfd, start=0)  →  find free run of length >= file_blocks
+       if no run large enough: skip file (or defrag partially)
+
+    3. BLK_ALLOC(mountfd, block) for each block in free run
+       retry on -EEXIST (TOCTOU race with normal allocator)
+
+    4. open(path, O_RDONLY) + pread each extent → write to new physical blocks
+       via direct block device access (/dev/loopX)
+       (EXT_MV moves pointer only; data must be pre-populated)
+
+    5. EXT_MV(mountfd, ino, exp_iver, log_start=0, new_phy, len=file_blocks)
+       on -EAGAIN: re-read iversion + re-copy data + retry
+       on success: file now points to contiguous new_phy run
+
+    6. BLK_FREE(mountfd, old_phy) for each old physical block
+```
+
+#### Key design decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Granularity | Whole-file | Simpler; produces fully contiguous result; requires free run ≥ file size |
+| Threshold | `extents > 1` | Defrag any fragmented file; can be tuned |
+| Data copy path | `/dev/loopX` raw write to new physical blocks | Required since EXT_MV moves pointer only |
+| EAGAIN retry | Re-read iver + re-copy + re-remap | iversion changes if file was written concurrently |
+| EEXIST retry | Re-scan FSP_ITER from last position | Normal allocator claimed the block between scan and alloc |
+| Skip condition | No free run ≥ file size | Log and move on; partially defragmenting a file is complex |
+
+#### Implementation files
+
+- `test/src/defrag.c` — main defragmenter binary
+- `test/Makefile` — add `defrag` to `NAMES`
+- `test/filebench/defrag.sh` — wrapper: mount image, run defrag, report fragmentation before/after
+
+#### Open question: raw block write path
+
+Step 4 requires writing data to physical block numbers on the loop device
+before the inode points to them. Options:
+- **`/dev/loopX` + `pwrite(fd, data, len, phy_block * FS_BLOCK_SIZE)`** — direct
+  raw writes to the block device. Requires knowing which `/dev/loopX` device
+  corresponds to the mounted image (`losetup -l` or `stat` the mount).
+- **`fallocate` + `write` via VFS** — allocate a temp file in the free run,
+  copy data, then `EXT_MV` both files. Avoids raw device access but is more
+  complex.
+
+The raw `/dev/loopX` approach is simpler to implement. This is the blocking
+design question to resolve first.
