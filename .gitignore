@@ -9,4 +9,6 @@ test/build/*
 
 *.img
 evfs-sandbox
+evfs-sandbox-20gb
 
+venv/

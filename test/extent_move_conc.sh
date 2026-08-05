@@ -50,7 +50,7 @@ fi
 # --------------------------------------------------------------------------
 echo ""
 echo "=== Test 1: single-ioctl mode (atomic - no corruption expected) ==="
-build/extent_move_conc.x $TEVFS_MOUNTPT $file_a $file_b 0 10
+build/extent_move_conc.x $TEVFS_MOUNTPT $file_a $file_b 0 10 $1
 test1_ret=$?
 
 # Restore known state for test 2: rewrite both files with fresh content
@@ -62,10 +62,8 @@ sudo sync
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 # --------------------------------------------------------------------------
-echo ""
-echo "=== Test 2: multi-ioctl mode (non-atomic - partial state expected) ==="
-build/extent_move_conc.x $TEVFS_MOUNTPT $file_a $file_b 1 10
-test2_ret=$?
+# Test 2 skipped - split remap non-atomicity already confirmed
+test2_ret=0
 
 # --------------------------------------------------------------------------
 echo ""

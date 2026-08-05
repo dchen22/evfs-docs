@@ -1539,6 +1539,20 @@ long ext4_ioctl_evfs(unsigned int cmd, struct inode * ino, struct super_block * 
 			ret = evfs_extent_move(sb, &k_args);
 			return ret;
 		}
+		case EXT4_EVFS_FSP_ITER:
+		{
+			struct ext4_evfs_fsp_iter_args k_args;
+			struct ext4_evfs_fsp_iter_args __user * u_args =
+				(struct ext4_evfs_fsp_iter_args __user *) arg;
+			if (copy_from_user(&(k_args.in), &(u_args->in), sizeof(k_args.in)))
+				return -EFAULT;
+
+			ret = evfs_fspace_iter(sb, &k_args);
+			if (copy_to_user(&(u_args->out), &(k_args.out), sizeof(k_args.out)))
+				return -EFAULT;
+
+			return ret;
+		}
 		default:
 			return -ENOTTY;
 	}

@@ -5,10 +5,11 @@
  *   file_a  (N blocks, all 0xAA bytes)  ← subject under test
  *   file_b  (N blocks, all 0xBB bytes)  ← donor (physical blocks as swap target)
  *
- * Writer thread continuously remaps file_a's extent between PA (0xAA) and
- * PB (0xBB).  Reader thread writes a rolling byte value (0x00..0xFF cycling)
- * then immediately reads back; if the remapper swapped the extent between the
- * pwrite and pread the read returns stale data from the other physical block.
+ * Remapper thread continuously remaps file_a's extent between PA (0xAA) and
+ * PB (0xBB).  Verifier thread writes a rolling byte value (0x00..0xFF
+ * cycling) then reads back after a random 0..READ_DELAY_MAX_US µs delay;
+ * if the remapper swapped the extent between the pwrite and pread the read
+ * returns stale data from the other physical block.
  *
  * Atomicity check: every byte in the pread result must be the same value as
  * every other byte.  A uniform read (all 0xAA, all 0xBB, all write_color,
@@ -18,26 +19,26 @@
  *
  * Contention counters (userspace proxies for kernel lock contention):
  *
- *   writer_saw_reader - each time the writer enters ext_mv while the
- *     reader is inside pread.  The writer's down_write(i_data_sem) will
+ *   remapper_saw_verifier - each time the remapper enters ext_mv while the
+ *     verifier is inside pread.  The remapper's down_write(i_data_sem) will
  *     have to wait for that in-flight read lock to drain before it can
  *     take the exclusive lock.
  *
- *   reader_saw_writer - each time the reader enters pread while the
- *     writer is inside ext_mv.  The reader's down_read(i_data_sem) will
- *     block until the writer releases the write lock.
+ *   verifier_saw_remapper - each time the verifier enters pread while the
+ *     remapper is inside ext_mv.  The verifier's down_read(i_data_sem) will
+ *     block until the remapper releases the write lock.
  *
  * Both counters are approximate (the flags are set in userspace before
  * entering the kernel, so there is a small window around the syscall
  * boundary), but they reliably track the overlap frequency and let us
  * compare mode 0 vs mode 1: mode 0 holds the write lock for all N blocks
- * at once, so reader_saw_writer should be higher; mode 1 holds it for
- * only N/2 blocks at a time, giving the reader more free windows.
+ * at once, so verifier_saw_remapper should be higher; mode 1 holds it for
+ * only N/2 blocks at a time, giving the verifier more free windows.
  *
  * EAGAIN count: evfs_extent_move checks i_version under the write lock
  * and returns -EAGAIN if it changed since the caller last read it.
- * pwrite() bumps i_version, so EAGAIN fires whenever the reader thread
- * writes to the file between the writer's get_iver() and the ioctl.
+ * pwrite() bumps i_version, so EAGAIN fires whenever the verifier writes
+ * to the file between the remapper's get_iver() and the ioctl.
  *
  * Mode 0 – single ioctl  (atomic, no corruption expected)
  * Mode 1 – two ioctls    (non-atomic, corruption expected)
@@ -66,8 +67,8 @@
 #define COLOR_A        ((uint8_t)0xAA)
 #define COLOR_B        ((uint8_t)0xBB)
 #define MAX_EXTENTS    64
-#define READ_DELAY_US  100   /* µs between pwrite and pread; widens the
-                                window for the remapper to land in */
+#define READ_DELAY_MAX_US  100  /* upper bound (µs) for the random delay
+                                   between pwrite and pread */
 
 /* ------------------------------------------------------------------ */
 
@@ -80,25 +81,26 @@ typedef struct {
 	unsigned long long phy_a;       /* physical block start of file_a */
 	unsigned long long phy_b;       /* physical block start of file_b */
 	unsigned int       num_blocks;
-	int                multi_ioctl; /* 0 = single call, 1 = two calls */
+	int                multi_ioctl;   /* 0 = single call, 1 = two calls */
 	int                duration_secs;
+	int                delay_us;     /* fixed pwrite→pread delay in µs */
 
 	atomic_int stop;
 
 	/* set while each thread is inside its syscall - read by the other */
-	atomic_int reader_in_pread;
-	atomic_int writer_in_ioctl;
+	atomic_int verifier_in_pread;
+	atomic_int remapper_in_ioctl;
 
-	/* writer metrics */
-	long writer_swaps;
-	long writer_ioctl_calls;
-	long writer_eagain;
-	long writer_saw_reader; /* entered ext_mv while reader was in pread */
+	/* remapper metrics */
+	long remapper_swaps;
+	long remapper_ioctl_calls;
+	long remapper_eagain;
+	long remapper_saw_verifier; /* entered ext_mv while verifier was in pread */
 
-	/* reader metrics */
-	long reader_reads;
-	long reader_corrupt;
-	long reader_saw_writer; /* entered pread while writer was in ext_mv */
+	/* verifier metrics */
+	long verifier_reads;
+	long verifier_torn;
+	long verifier_saw_remapper; /* entered pread while remapper was in ext_mv */
 } ctx_t;
 
 /* ------------------------------------------------------------------ */
@@ -124,7 +126,7 @@ static unsigned long long get_iver(const char *path)
 
 /*
  * Issue one ext_mv call, updating contention + EAGAIN counters.
- * The writer_in_ioctl flag is set for the duration so the reader can
+ * The remapper_in_ioctl flag is set for the duration so the verifier can
  * detect it.
  */
 static void tracked_ext_mv(ctx_t *ctx, int mnt_fd,
@@ -134,8 +136,8 @@ static void tracked_ext_mv(ctx_t *ctx, int mnt_fd,
 			    unsigned int len)
 {
 	/* Check for contention before entering the syscall */
-	if (atomic_load(&ctx->reader_in_pread))
-		ctx->writer_saw_reader++;
+	if (atomic_load(&ctx->verifier_in_pread))
+		ctx->remapper_saw_verifier++;
 
 	struct ext4_evfs_ext_mv_args a;
 	memset(&a, 0, sizeof(a));
@@ -145,14 +147,14 @@ static void tracked_ext_mv(ctx_t *ctx, int mnt_fd,
 	a.in.ext.phy_start = phy_start;
 	a.in.ext.len       = len;
 
-	atomic_store(&ctx->writer_in_ioctl, 1);
+	atomic_store(&ctx->remapper_in_ioctl, 1);
 	int ret = ioctl(mnt_fd, EXT4_EVFS_EXT_MV, &a);
-	atomic_store(&ctx->writer_in_ioctl, 0);
+	atomic_store(&ctx->remapper_in_ioctl, 0);
 
-	ctx->writer_ioctl_calls++;
+	ctx->remapper_ioctl_calls++;
 	if (ret < 0) {
 		if (errno == EAGAIN)
-			ctx->writer_eagain++;
+			ctx->remapper_eagain++;
 		else
 			perror("ext_mv");
 	}
@@ -203,14 +205,14 @@ static int get_phys_info(const char *path,
 
 /* ------------------------------------------------------------------ */
 
-static void *writer_fn(void *arg)
+static void *remapper_fn(void *arg)
 {
 	ctx_t *ctx = (ctx_t *)arg;
 
-	printf("writer running on CPU %d\n", sched_getcpu());
+	printf("remapper running on CPU %d\n", sched_getcpu());
 
 	int mnt_fd = open(ctx->mountpt, O_RDONLY);
-	if (mnt_fd < 0) { perror("open mountpt (writer)"); return NULL; }
+	if (mnt_fd < 0) { perror("open mountpt (remapper)"); return NULL; }
 
 	int state = 0; /* 0: file_a -> PA, 1: file_a->PB */
 	long swaps = 0;
@@ -233,16 +235,16 @@ static void *writer_fn(void *arg)
 		swaps++;
 	}
 
-	ctx->writer_swaps = swaps;
+	ctx->remapper_swaps = swaps;
 	close(mnt_fd);
 	return NULL;
 }
 
-static void *reader_fn(void *arg)
+static void *verifier_fn(void *arg)
 {
 	ctx_t *ctx = (ctx_t *)arg;
 
-	printf("reader running on CPU %d\n", sched_getcpu());
+	printf("verifier running on CPU %d\n", sched_getcpu());
 
 	size_t file_size = (size_t)ctx->num_blocks * FS_BLOCK_SIZE;
 
@@ -259,10 +261,10 @@ static void *reader_fn(void *arg)
 			strerror(errno));
 		direct = 0;
 		fd = open(ctx->path_a, O_RDWR);
-		if (fd < 0) { perror("open file_a (reader)"); free(buf); return NULL; }
+		if (fd < 0) { perror("open file_a (verifier)"); free(buf); return NULL; }
 	}
 
-	long reads = 0, corrupt = 0, saw_writer = 0;
+	long reads = 0, torn = 0, saw_remapper = 0;
 
 	/*
 	 * write_color cycles 0x00..0xFF each iteration.  Using a fresh value
@@ -279,21 +281,24 @@ static void *reader_fn(void *arg)
 			posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
 
 		/* Check for contention before entering the syscalls */
-		if (atomic_load(&ctx->writer_in_ioctl))
-			saw_writer++;
+		if (atomic_load(&ctx->remapper_in_ioctl))
+			saw_remapper++;
 
 		/*
-		 * Write write_color then immediately read back.  If the
-		 * remapper swaps the extent between the write and the read,
-		 * the read returns stale data from the other physical block
-		 * rather than the value we just wrote.
+		 * Write write_color, sleep delay_us µs, then read back.  The
+		 * delay widens the window for the remapper to land between the
+		 * two operations.  verifier_in_pread is only raised around the
+		 * pread itself so the remapper's contention counter accurately
+		 * reflects i_data_sem read-lock overlap.
 		 */
-		atomic_store(&ctx->reader_in_pread, 1);
 		pwrite(fd, buf, file_size, 0);
-		if (READ_DELAY_US > 0)
-			usleep(READ_DELAY_US);
+
+		if (ctx->delay_us > 0)
+			usleep((useconds_t)ctx->delay_us);
+
+		atomic_store(&ctx->verifier_in_pread, 1);
 		ssize_t n = pread(fd, buf, file_size, 0);
-		atomic_store(&ctx->reader_in_pread, 0);
+		atomic_store(&ctx->verifier_in_pread, 0);
 
 		if (n <= 0) { write_color++; continue; }
 
@@ -313,8 +318,8 @@ static void *reader_fn(void *arg)
 
 		reads++;
 		if (bad) {
-			corrupt++;
-			if (corrupt <= 5) {
+			torn++;
+			if (torn <= 5) {
 				int match = 0, aa = 0, bb = 0, other = 0;
 				for (ssize_t i = 0; i < n; i++) {
 					if      (b[i] == write_color) match++;
@@ -323,10 +328,10 @@ static void *reader_fn(void *arg)
 					else                          other++;
 				}
 				fprintf(stderr,
-					"[reader] torn read #%ld: "
+					"[verifier] torn read #%ld: "
 					"write_color=0x%02x "
 					"write_color_count=%d 0xAA=%d 0xBB=%d other=%d\n",
-					corrupt, write_color,
+					torn, write_color,
 					match, aa, bb, other);
 			}
 		}
@@ -334,9 +339,9 @@ static void *reader_fn(void *arg)
 		write_color++;   /* uint8_t wraps 0xFF -> 0x00 automatically */
 	}
 
-	ctx->reader_reads      = reads;
-	ctx->reader_corrupt    = corrupt;
-	ctx->reader_saw_writer = saw_writer;
+	ctx->verifier_reads       = reads;
+	ctx->verifier_torn        = torn;
+	ctx->verifier_saw_remapper = saw_remapper;
 	free(buf);
 	close(fd);
 	return NULL;
@@ -346,9 +351,9 @@ static void *reader_fn(void *arg)
 
 int main(int argc, char *argv[])
 {
-	if (argc != 6) {
+	if (argc != 7) {
 		fprintf(stderr,
-			"usage: %s <mountpt> <file_a> <file_b> <mode> <secs>\n"
+			"usage: %s <mountpt> <file_a> <file_b> <mode> <secs> <delay_us>\n"
 			"  mode 0 = single ioctl  (atomic;     no corruption expected)\n"
 			"  mode 1 = two ioctls    (non-atomic; corruption expected)\n",
 			argv[0]);
@@ -362,6 +367,7 @@ int main(int argc, char *argv[])
 	strncpy(ctx.path_b,  argv[3], sizeof(ctx.path_b)  - 1);
 	ctx.multi_ioctl   = atoi(argv[4]);
 	ctx.duration_secs = atoi(argv[5]);
+	ctx.delay_us      = atoi(argv[6]);
 
 	struct stat sa, sb;
 	if (stat(ctx.path_a, &sa) < 0) { perror("stat file_a"); return 1; }
@@ -394,60 +400,61 @@ int main(int argc, char *argv[])
 	       ctx.multi_ioctl
 	       ? "1 - two ioctls (non-atomic; corruption expected)"
 	       : "0 - single ioctl (atomic; no corruption expected)");
+	printf("delay:      %d µs\n", ctx.delay_us);
 	printf("duration:   %d s\n\n", ctx.duration_secs);
 
-	atomic_init(&ctx.stop,           0);
-	atomic_init(&ctx.reader_in_pread, 0);
-	atomic_init(&ctx.writer_in_ioctl, 0);
+	atomic_init(&ctx.stop,              0);
+	atomic_init(&ctx.verifier_in_pread, 0);
+	atomic_init(&ctx.remapper_in_ioctl, 0);
 
-	/* Pin writer and reader to separate CPUs for true parallelism.
+	/* Pin remapper and verifier to separate CPUs for true parallelism.
 	 * Fall back gracefully if the system has fewer than 2 CPUs. */
 	int ncpus = (int)sysconf(_SC_NPROCESSORS_ONLN);
 	int pin = (ncpus >= 2);
 	if (pin)
-		printf("pinning writer->CPU0, reader->CPU1 (%d CPUs online)\n",
+		printf("pinning remapper->CPU0, verifier->CPU1 (%d CPUs online)\n",
 		       ncpus);
 	else
 		printf("warning: only %d CPU online - affinity pinning skipped\n",
 		       ncpus);
 
-	pthread_t wt, rt;
-	pthread_create(&wt, NULL, writer_fn, &ctx);
-	pthread_create(&rt, NULL, reader_fn, &ctx);
+	pthread_t rmt, vt;
+	pthread_create(&rmt, NULL, remapper_fn, &ctx);
+	pthread_create(&vt,  NULL, verifier_fn, &ctx);
 
 	if (pin) {
-		if (pin_thread(wt, 0))
-			perror("pin writer");
-		if (pin_thread(rt, 1))
-			perror("pin reader");
+		if (pin_thread(rmt, 0))
+			perror("pin remapper");
+		if (pin_thread(vt, 1))
+			perror("pin verifier");
 	}
 
 	sleep(ctx.duration_secs);
 	atomic_store(&ctx.stop, 1);
 
-	pthread_join(wt, NULL);
-	pthread_join(rt, NULL);
+	pthread_join(rmt, NULL);
+	pthread_join(vt,  NULL);
 
 	printf("\n=== results ===\n");
-	printf("writer swaps:        %ld\n", ctx.writer_swaps);
-	printf("writer ioctl calls:  %ld\n", ctx.writer_ioctl_calls);
-	printf("writer EAGAIN:       %ld\n", ctx.writer_eagain);
-	printf("writer saw reader:   %ld  (ext_mv entered while reader was in pread)\n",
-	       ctx.writer_saw_reader);
-	printf("reader reads:        %ld\n", ctx.reader_reads);
-	printf("reader saw writer:   %ld  (pread entered while writer was in ext_mv)\n",
-	       ctx.reader_saw_writer);
-	printf("torn reads:          %ld\n", ctx.reader_corrupt);
+	printf("remapper swaps:        %ld\n", ctx.remapper_swaps);
+	printf("remapper ioctl calls:  %ld\n", ctx.remapper_ioctl_calls);
+	printf("remapper EAGAIN:       %ld\n", ctx.remapper_eagain);
+	printf("remapper saw verifier: %ld  (ext_mv entered while verifier was in pread)\n",
+	       ctx.remapper_saw_verifier);
+	printf("verifier reads:        %ld\n", ctx.verifier_reads);
+	printf("verifier saw remapper: %ld  (pread entered while remapper was in ext_mv)\n",
+	       ctx.verifier_saw_remapper);
+	printf("torn reads:            %ld\n", ctx.verifier_torn);
 
 	int pass;
 	if (!ctx.multi_ioctl) {
-		pass = (ctx.reader_corrupt == 0);
+		pass = (ctx.verifier_torn == 0);
 		printf("\n%s  (single-ioctl: %s)\n",
 		       pass ? "PASS" : "FAIL",
 		       pass ? "no torn reads - extent swap is atomic"
 		            : "torn read observed - single-ioctl is NOT atomic!");
 	} else {
-		pass = (ctx.reader_corrupt > 0);
+		pass = (ctx.verifier_torn > 0);
 		printf("\n%s  (multi-ioctl: %s)\n",
 		       pass ? "PASS" : "NOTE",
 		       pass ? "torn reads observed - non-atomicity confirmed"

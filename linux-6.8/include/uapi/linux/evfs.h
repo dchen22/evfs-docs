@@ -154,6 +154,7 @@ struct ext4_evfs_ext_mv_args
 #define EXT4_EVFS_DEN_UPDATE _IOW('f', 109, struct ext4_evfs_de_update_args)
 #define EXT4_EVFS_EXT_READ _IOWR('f', 110, struct ext4_evfs_ext_read_args)
 #define EXT4_EVFS_EXT_MV _IOW('f', 111, struct ext4_evfs_ext_mv_args)
+#define EXT4_EVFS_FSP_ITER _IOWR('f', 112, struct ext4_evfs_fsp_iter_args)
 
 #endif
 

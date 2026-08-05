@@ -8,7 +8,7 @@ BUILD_DIR := build
 
 NAMES = hello iver balloc bfree ialloc ifree iread\
 	dentry_add dentry_read dentry_update dentry_delete\
-	extent_move.n extent_move.c extent_move_conc
+	extent_move.n extent_move.c extent_move_conc remapper
 
 TARGETS = $(addprefix $(BUILD_DIR)/, $(NAMES:=.x))
 
